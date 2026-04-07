@@ -34,8 +34,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: install Metal Toolchain
-        run: xcodebuild -downloadComponent MetalToolchain
       - name: build release binary
         run: cargo build --release --workspace --locked
       - name: bundle, codesign, notarize, staple, package dmg

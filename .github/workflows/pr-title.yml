@@ -44,6 +44,8 @@ jobs:
             ci
             release
             dev-practices
+            deps
+            deps-dev
           requireScope: false
           subjectPattern: ^(?![A-Z])(?!.*\.$).+$
           subjectPatternError: >
