@@ -1,0 +1,12 @@
+[package]
+name = "atomio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "atomio"
+path = "src/main.rs"
+
+[dependencies]
+editor_core.workspace = true

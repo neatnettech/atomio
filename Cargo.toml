@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/atomio",
+    "crates/editor_core",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/piotrpestka/atomio"
+rust-version = "1.75"
+
+[workspace.dependencies]
+editor_core = { path = "crates/editor_core" }
+ropey = "1.6"
