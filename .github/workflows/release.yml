@@ -29,6 +29,7 @@ jobs:
     name: build + codesign + notarize
     runs-on: macos-14
     environment: production
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -1,0 +1,47 @@
+version: 2
+
+# Dependabot proposes weekly updates for both GitHub Actions (so we
+# never miss a deprecation like actions/checkout@v3) and cargo
+# dependencies (for security fixes and feature releases).
+#
+# Dependabot PRs go through the same ci + pr-title gates as any other
+# PR, so Conventional Commit titles are enforced.
+
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Europe/Warsaw"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: scope
+    labels:
+      - "type:chore"
+      - "area:ci"
+
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Europe/Warsaw"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
+      include: scope
+    labels:
+      - "type:chore"
+    groups:
+      # Group non-major updates into one PR per ecosystem to keep the
+      # review burden low. Majors still get individual PRs because
+      # they may require breaking changes.
+      non-major:
+        update-types:
+          - minor
+          - patch

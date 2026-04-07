@@ -17,6 +17,7 @@ jobs:
   check:
     name: fmt + clippy + test (macos-arm64)
     runs-on: macos-14
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -24,14 +25,16 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: install Metal Toolchain
-        # gpui compiles Metal shaders at build time and needs this component.
+        # gpui compiles Metal shaders at build time and needs this
+        # component. Runners are ephemeral so this runs every build
+        # (~700 MB, ~1 minute).
         run: xcodebuild -downloadComponent MetalToolchain
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: build
-        run: cargo build --workspace --locked
       - name: test
+        # `cargo test` builds the whole workspace, so no separate
+        # `cargo build` step is needed.
         run: cargo test --workspace --locked
 

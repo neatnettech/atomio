@@ -29,6 +29,7 @@ jobs:
     name: tag and publish pre-release
     runs-on: macos-14
     environment: staging
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,9 +47,17 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
-          VERSION=$(awk -F '"' '/^version/ {print $2; exit}' Cargo.toml)
+          # Read version scoped to [workspace.package] in the root
+          # Cargo.toml. release-please updates this value on stable
+          # releases; member crates inherit it via
+          # version.workspace = true.
+          VERSION=$(awk -F'"' '
+            /^\[workspace\.package\]/ { in_section = 1; next }
+            /^\[/ { in_section = 0 }
+            in_section && /^version[[:space:]]*=/ { print $2; exit }
+          ' Cargo.toml)
           if [ -z "$VERSION" ]; then
-            echo "could not read version from Cargo.toml" >&2
+            echo "could not read [workspace.package].version from Cargo.toml" >&2
             exit 1
           fi
           LAST=$(git tag --list "v${VERSION}-${CHANNEL}.*" | sort -V | tail -n1 || true)

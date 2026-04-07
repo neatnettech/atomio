@@ -71,7 +71,7 @@ The 24h soak on `production` means **even if you tag a stable release at 2am, no
 
 ### Branch protection rules on `main`
 
-Configured in repo settings (documented here so it's reproducible):
+Configured in repo settings. The exact click-path and the full list of options (environments, labels, secrets, signed commits) lives in [`github-setup.md`](./github-setup.md), the manual companion to this file. Summary:
 
 - Require PR before merge.
 - Require status checks to pass: `ci / check`, `audit / audit`, `pr-title / validate`.
@@ -361,6 +361,7 @@ Lives in `.github/ISSUE_TEMPLATE/`:
 | `README.md` | root | First-time visitor. Manifesto + quick build. |
 | `docs/ROADMAP.md` | `/docs` | Contributors & followers. The plan. |
 | `docs/dev-practices.md` | `/docs` | Contributors. This file. |
+| `docs/github-setup.md` | `/docs` | Maintainer. Manual GitHub UI clicks that enforce this document. |
 | `CHANGELOG.md` | root | Users upgrading between versions. |
 | `docs/architecture.md` | `/docs` | Contributors. High-level system design. (TODO v0.1) |
 | `docs/sdk/` | `/docs` | Plugin authors. (TODO v1.0) |

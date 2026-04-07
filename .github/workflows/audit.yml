@@ -1,5 +1,10 @@
 name: audit
 
+# Dependency CVE scan. Runs weekly on a cron, on any PR touching
+# Cargo.lock or a Cargo.toml, and on-demand via workflow_dispatch.
+# Ubuntu-only: cargo-audit does not need macOS and Linux runners are
+# 10x cheaper than macOS runners.
+
 on:
   schedule:
     - cron: "0 6 * * 1"
@@ -14,10 +19,11 @@ permissions:
 
 jobs:
   audit:
-    runs-on: macos-14
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-audit --locked
-      - run: cargo audit
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ github.token }}
