@@ -43,7 +43,19 @@ Full roadmap: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 cargo run -p atomio
 ```
 
-Requires Rust stable and macOS 13+ on Apple Silicon.
+Requires:
+
+- Rust stable
+- macOS 13+ on Apple Silicon
+- Xcode Command Line Tools
+- Apple's Metal Toolchain — install once with:
+
+  ```sh
+  xcodebuild -downloadComponent MetalToolchain
+  ```
+
+  (gpui compiles its Metal shaders at build time and needs this even for a
+  trivial window. Roughly 700 MB.)
 
 ## License
 
