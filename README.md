@@ -13,12 +13,12 @@ Atom was archived in December 2022. The Electron + CoffeeScript stack couldn't k
 
 ## What
 
-- 🦀 **Rust + [`gpui`](https://github.com/zed-industries/zed) + Metal** — native, GPU-rendered, ProMotion-smooth.
-- 🌳 **Tree-sitter** for syntax (Atom invented it — we're bringing it home).
-- 🔌 **VS Code extension compatibility** via a Node sidecar host.
-- 🤖 **AI agent built in** — pluggable providers (Anthropic, OpenAI, Ollama). Inline edits, not a chat sidebar.
-- 🎨 **WASM + TypeScript SDK** for native plugins, with an API that echoes Atom's beloved `atom.workspace`.
-- 📦 **Single signed `.dmg`**, auto-updating, no Electron.
+- **Rust + [`gpui`](https://github.com/zed-industries/zed) + Metal** — native, GPU-rendered, ProMotion-smooth.
+- **Tree-sitter** for syntax (Atom invented it — we're bringing it home).
+- **VS Code extension compatibility** via a Node sidecar host.
+- **AI agent built in** — pluggable providers (Anthropic, OpenAI, Ollama). Inline edits, not a chat sidebar.
+- **WASM + TypeScript SDK** for native plugins, with an API that echoes Atom's beloved `atom.workspace`.
+- **Single signed `.dmg`**, auto-updating, no Electron.
 
 ## Status
 

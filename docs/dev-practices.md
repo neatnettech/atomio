@@ -24,7 +24,7 @@ If a rule ever gets in the way of shipping, open a PR to change the rule before 
 
 | Branch | Purpose | Protected |
 |---|---|---|
-| `main` | Always releasable. All work lands here. | ✅ |
+| `main` | Always releasable. All work lands here. | yes |
 | `feat/<slug>` | New feature, short-lived (<1 week) | — |
 | `fix/<slug>` | Bug fix | — |
 | `chore/<slug>` | Tooling, docs, CI, refactor | — |

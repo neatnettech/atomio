@@ -143,14 +143,14 @@ Each milestone is sized for **~2–3 months of evening/weekend work** by one per
 ## Backlog (Won't-Do List — important for solo focus)
 
 These are tempting and **must be refused** in year one:
-- ❌ Cross-platform (macOS only).
-- ❌ Custom rendering engine (use `gpui`).
-- ❌ Custom extension format that competes with VS Code's (compat first).
-- ❌ Vim mode (LSP-quality vim is a project of its own — community plugin later).
-- ❌ Notebook / Jupyter UI.
-- ❌ Built-in terminal (use Warp/iTerm — add later).
-- ❌ Self-hosted sync / accounts / cloud anything.
-- ❌ Mobile companion app.
+-Cross-platform (macOS only).
+-Custom rendering engine (use `gpui`).
+-Custom extension format that competes with VS Code's (compat first).
+-Vim mode (LSP-quality vim is a project of its own — community plugin later).
+-Notebook / Jupyter UI.
+-Built-in terminal (use Warp/iTerm — add later).
+-Self-hosted sync / accounts / cloud anything.
+-Mobile companion app.
 
 Each "no" is what makes the "yes" list achievable solo.
 
