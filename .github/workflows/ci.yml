@@ -24,11 +24,6 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: install Metal Toolchain
-        # gpui compiles Metal shaders at build time and needs this
-        # component. Runners are ephemeral so this runs every build
-        # (~700 MB, ~1 minute).
-        run: xcodebuild -downloadComponent MetalToolchain
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy

@@ -53,15 +53,7 @@ Requires:
 
 - Rust stable
 - macOS 13+ on Apple Silicon
-- Xcode Command Line Tools
-- Apple's Metal Toolchain — install once with:
-
-  ```sh
-  xcodebuild -downloadComponent MetalToolchain
-  ```
-
-  (gpui compiles its Metal shaders at build time and needs this even for a
-  trivial window. Roughly 700 MB.)
+- Full Xcode (not just Command Line Tools) — gpui compiles Metal shaders at build time and needs the `metal` compiler bundled with Xcode.
 
 ## License
 
