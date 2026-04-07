@@ -1,7 +1,13 @@
 # atomio
 
+[![status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-red)](docs/ROADMAP.md)
+[![ci](https://github.com/neatnettech/atomio/actions/workflows/ci.yml/badge.svg)](https://github.com/neatnettech/atomio/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 > **Atom's soul. VS Code's ecosystem. Zed's speed.**
 > Hackable to the core. Again.
+
+> **Status: pre-alpha.** The trunk builds and opens a window. There is no editor yet. Expect breakage until `v0.1.0`. See [the roadmap](docs/ROADMAP.md).
 
 **atomio** is a revival of the [Atom editor](https://github.com/atom/atom) — rebuilt from scratch in Rust on a native, GPU-accelerated stack, designed to feel as hackable as Atom, run the VS Code extensions you already use, and ship with an AI agent that lives *inside* the editor.
 

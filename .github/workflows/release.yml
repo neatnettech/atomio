@@ -1,0 +1,52 @@
+name: release
+
+# Stable releases only. Triggered when a vX.Y.Z (no prerelease suffix)
+# tag lands on main via a merged release-please PR. Pre-release alpha
+# and beta tags are handled by a separate cut-prerelease workflow, and
+# nightlies by nightly.yml.
+#
+# This job targets the `production` GitHub Environment, which holds the
+# Apple codesign + notarization secrets and enforces a 24-hour wait
+# timer and required self-approval. Even if a tag is pushed by mistake,
+# nothing ships to users until the environment is approved. See
+# docs/dev-practices.md section 2 for the policy rationale.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: build + codesign + notarize
+    runs-on: macos-14
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+      - name: build release binary
+        run: cargo build --release --workspace --locked
+      - name: bundle, codesign, notarize, staple, package dmg
+        # TODO v0.1 flesh this out. Pseudocode:
+        #   1. Build target/release/atomio into an .app bundle with
+        #      Info.plist, icon set, and entitlements.
+        #   2. codesign --deep --force --options runtime --sign DEV_ID_APP atomio.app
+        #   3. ditto -c -k --keepParent atomio.app atomio.zip
+        #   4. xcrun notarytool submit atomio.zip --wait
+        #      using APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD from env
+        #   5. xcrun stapler staple atomio.app
+        #   6. create-dmg atomio.dmg atomio.app
+        # Secrets come from the production environment, not repo
+        # secrets, so only this job can read them.
+        run: echo "TODO bundle codesign notarize staple package dmg"

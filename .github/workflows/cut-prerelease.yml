@@ -1,0 +1,84 @@
+name: cut-prerelease
+
+# Manually cuts an alpha or beta pre-release from the current main.
+# Unlike stable releases, pre-releases do not go through release-please
+# and target the `staging` environment (no soak timer, no codesigning
+# secrets). Use this to ship alphas and betas per the Definition of Done
+# in docs/dev-practices.md section 5.
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "alpha or beta"
+        type: choice
+        required: true
+        options:
+          - alpha
+          - beta
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cut-prerelease
+  cancel-in-progress: false
+
+jobs:
+  cut:
+    name: tag and publish pre-release
+    runs-on: macos-14
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+      - name: build release binary
+        run: cargo build --release --workspace --locked
+
+      - name: compute next pre-release tag
+        id: compute
+        env:
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          VERSION=$(awk -F '"' '/^version/ {print $2; exit}' Cargo.toml)
+          if [ -z "$VERSION" ]; then
+            echo "could not read version from Cargo.toml" >&2
+            exit 1
+          fi
+          LAST=$(git tag --list "v${VERSION}-${CHANNEL}.*" | sort -V | tail -n1 || true)
+          if [ -z "$LAST" ]; then
+            N=1
+          else
+            N=$(( ${LAST##*.} + 1 ))
+          fi
+          TAG="v${VERSION}-${CHANNEL}.${N}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: create and push annotated tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.compute.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "atomio-bot"
+          git config user.email "bot@atomio.dev"
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "$TAG"
+
+      - name: publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.compute.outputs.tag }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --prerelease \
+            --title "$TAG" \
+            --notes "Pre-release on the ${CHANNEL} channel. See CHANGELOG.md."

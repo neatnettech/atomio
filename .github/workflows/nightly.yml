@@ -1,0 +1,60 @@
+name: nightly
+
+# Moves the `nightly` tag forward on every green main and publishes a
+# GitHub pre-release so users can subscribe to the nightly channel via a
+# stable tag name. The actual build happens here; release.yml handles
+# signed stable releases only.
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    # Only run if the upstream ci run on main succeeded.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: macos-14
+    environment: nightly
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+      - name: build release binary
+        run: cargo build --release --workspace --locked
+
+      - name: move nightly tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "atomio-bot"
+          git config user.email "bot@atomio.dev"
+          git tag -f nightly
+          git push -f origin nightly
+
+      - name: publish nightly pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete nightly --yes || true
+          gh release create nightly \
+            --prerelease \
+            --title "nightly" \
+            --notes "Automatically built from the latest green main. Not signed. Not for daily use. See docs/dev-practices.md section 5."

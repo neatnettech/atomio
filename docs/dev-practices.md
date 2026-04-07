@@ -18,29 +18,72 @@ If a rule ever gets in the way of shipping, open a PR to change the rule before 
 
 ## 2. Branching Strategy
 
-**Trunk-based development with short-lived feature branches.** Not GitFlow. Not release branches. No `develop`.
+**Trunk-based development with release channels via tags.** One long-lived branch (`main`). Stability is a *tag*, not a *branch*. This is how Zed, Helix, Chromium, and modern Rust projects ship.
+
+No `develop`. No `preview`. No `staging`. No release branches (unless we ever need to LTS-maintain a historical major version).
 
 ### Branches
 
 | Branch | Purpose | Protected |
 |---|---|---|
-| `main` | Always releasable. All work lands here. | yes |
+| `main` | The trunk. Default branch. Always green. All work lands here. | yes |
 | `feat/<slug>` | New feature, short-lived (<1 week) | — |
 | `fix/<slug>` | Bug fix | — |
 | `chore/<slug>` | Tooling, docs, CI, refactor | — |
 | `spike/<slug>` | Throwaway experiment — never merged | — |
+| `release-please--*` | Auto-opened by release-please bot | — |
+
+### Release channels (tags, not branches)
+
+Stability lives in tags and GitHub Environments, not branches:
+
+| Tag / ref | Channel | Cut by | Gate |
+|---|---|---|---|
+| `nightly` (moving tag) | latest green `main` | CI, auto on every push | green CI |
+| `vX.Y.Z-alpha.N` | alpha | maintainer, manual | CI + smoke test + docs |
+| `vX.Y.Z-beta.N` | beta | maintainer, manual | CI + feature freeze + benches + no P0 |
+| `vX.Y.Z` | stable | `release-please` bot PR → merge | everything above + 24h soak + hand-written notes |
+| `vX.Y.Z+1` patch | stable hotfix | `fix:` commit → bot → merge | same as stable |
+
+All version tags are **annotated and signed**: `git tag -s vX.Y.Z -m "..."`.
+`nightly` is a lightweight moving tag advanced by CI on every green `main`.
+
+### GitHub Environments (the policy layer)
+
+Three environments, configured in repo settings. They enforce release gates mechanically so solo-after-hours discipline doesn't have to.
+
+| Environment | Used by | Secrets | Approval | Wait timer |
+|---|---|---|---|---|
+| `nightly` | nightly workflow | none | none | none |
+| `staging` | alpha/beta workflow | none | none | none |
+| `production` | stable release workflow | `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`, `MACOS_CERT_P12`, `MACOS_CERT_PASSWORD` | required reviewer: self | 24 hours |
+
+The 24h soak on `production` means **even if you tag a stable release at 2am, nothing ships until you explicitly approve it the next day**. This is the single most important guardrail for solo after-hours work.
 
 ### Rules
 
-- Branch off `main`. Rebase onto `main` before merging (no merge commits on `main` — linear history).
-- **Squash-merge** feature branches into `main` via PR. One PR = one logical change = one commit on `main`.
+- Branch off `main`. Rebase onto `main` before merging (linear history — no merge commits).
+- **Squash-merge** feature branches into `main` via PR. One PR = one logical change = one commit on `main`. The PR title *is* the commit message and must be a Conventional Commit.
 - Delete the branch after merge.
 - Never force-push to `main`. Force-push to your own feature branches is fine.
 - If a branch lives longer than a week, it's probably too big — split it.
+- **`main` is always green.** If CI breaks on `main`, revert-first is the default move. A broken trunk leaks the whole model.
+
+### Branch protection rules on `main`
+
+Configured in repo settings (documented here so it's reproducible):
+
+- Require PR before merge.
+- Require status checks to pass: `ci / check`, `audit / audit`, `pr-title / validate`.
+- Require branches to be up to date before merge.
+- Require signed commits.
+- Require linear history.
+- Disallow force push.
+- **Include administrators** — yes, even the sole maintainer. Rules you can silently bypass are not rules.
 
 ### Solo workflow shortcut
 
-When working solo and the change is obviously safe (docs, typo, trivial refactor), committing directly to `main` is allowed. **Anything touching `editor_core`, `language`, `ai`, or `ext_host_node` goes through a PR** — even solo — so CI runs and history stays reviewable.
+When working solo and the change is obviously safe (docs typo, CI tweak, this file itself), committing directly to `main` is allowed **only** until branch protection is enabled. After v0.0.0 is tagged, protection turns on and **everything** goes through a PR. No exceptions — the automation downstream (changelog, release-please, environment gating) depends on every commit flowing through the same pipe.
 
 ---
 
@@ -139,33 +182,83 @@ Brief description of the approach. Call out anything non-obvious.
 
 ## 5. Versioning & Releases
 
-**Semantic Versioning**, with a twist until v1.0:
+**Semantic Versioning** with automated bumps driven by Conventional Commits.
 
-- **v0.x.y** — breaking changes allowed on minor bumps (`0.1` → `0.2`). Patch (`0.1.0` → `0.1.1`) stays backward-compatible.
+- **v0.x.y** — breaking changes allowed on *minor* bumps (`0.1` → `0.2`). Patch (`0.1.0` → `0.1.1`) stays backward-compatible.
 - **v1.0.0** onward — strict SemVer. Breaking changes only on major bumps.
 
-### Git tags
+### Version bumps are automated
 
-- Every release is an annotated git tag: `v0.0.0`, `v0.1.0`, `v0.1.1`, …
-- Tag format: `vMAJOR.MINOR.PATCH`. No `release-` prefix. No tag on every commit.
-- Pre-releases: `v0.4.0-rc.1`, `v0.4.0-beta.2`.
+Versions are not bumped by hand. [`release-please`](https://github.com/googleapis/release-please) reads commit history on `main` and opens a "release PR" that:
 
-### Release flow
+- Bumps `workspace.package.version` in `Cargo.toml`.
+- Updates `CHANGELOG.md` from Conventional Commits.
+- Proposes the next tag.
 
-1. Bump version in `Cargo.toml` (`workspace.package.version`).
-2. Update `CHANGELOG.md` (generated from Conventional Commits — automated later).
-3. Commit: `chore(release): v0.1.0`.
-4. Tag: `git tag -a v0.1.0 -m "v0.1.0 — it edits"`.
-5. Push: `git push && git push --tags`.
-6. GitHub Actions `release` job builds, codesigns, notarizes, and attaches the `.dmg` to a GitHub Release.
-7. Write the release notes by hand on GitHub — they're marketing copy, not a changelog dump.
+Bump rules:
+
+- `feat:` → minor bump (`0.1.0` → `0.2.0` in v0.x; `1.1.0` → `1.2.0` post-v1).
+- `fix:` / `perf:` → patch bump.
+- `feat!:` or `BREAKING CHANGE:` footer → major bump post-v1, minor bump in v0.x.
+
+Merging the release PR triggers the tag + release workflow. **This is the only way versions change.** No manual version edits on `main`.
+
+### Tags and channels
+
+| Tag | Channel | How it's cut |
+|---|---|---|
+| `nightly` (moving) | nightly | CI advances it on every green `main` push |
+| `vX.Y.Z-alpha.N` | alpha | maintainer manually runs the "cut alpha" workflow |
+| `vX.Y.Z-beta.N` | beta | maintainer manually runs the "cut beta" workflow (requires feature freeze) |
+| `vX.Y.Z` | stable | merging a release-please PR |
+
+All version tags are **annotated and signed** (`git tag -s`). `nightly` is a lightweight moving tag; it gets force-updated every green build and is not signed. Never rely on `nightly` for reproducible builds — use an immutable `vX.Y.Z-*` tag instead.
+
+### Release flow — stable
+
+1. release-please has a PR open titled `chore(main): release 0.1.0`. Review the proposed CHANGELOG.
+2. Merge the PR.
+3. CI tags `v0.1.0`, triggers `release.yml` targeting the `production` environment.
+4. Environment's 24-hour wait timer holds the release as a draft. **Sleep on it.**
+5. Next day: run the release smoke test (see Definition of Done below). Approve the environment.
+6. Release publishes: `.app` bundle codesigned, notarized, stapled, packaged as `.dmg`, uploaded to GitHub Releases.
+7. Write the release notes by hand on the GitHub Release — they're marketing copy, not a changelog dump.
+
+### Release flow — alpha / beta
+
+1. From a green `main`, run the "cut alpha" (or beta) workflow manually via `workflow_dispatch`.
+2. Workflow computes the next pre-release identifier, creates `vX.Y.Z-alpha.N`, builds, ships to the `staging` environment (no soak timer).
+3. Pre-releases are marked "Pre-release" on GitHub and do not update the `latest` release pointer.
+
+### Release flow — nightly
+
+Nothing to do. Every green `main` push moves the `nightly` tag forward, builds, and publishes as a GitHub Pre-release with the tag name `nightly`. Old nightly artifacts are garbage-collected to keep the Releases page clean.
+
+### Release flow — hotfix
+
+No release branches. Hotfix flow is identical to normal work:
+
+1. `git checkout -b fix/<slug>` from `main`.
+2. PR, CI, squash-merge.
+3. release-please sees the `fix:` commit and opens a patch-bump PR.
+4. Merge → tag → release as above.
+
+### Definition of Done (per channel)
+
+| Channel | Gate |
+|---|---|
+| Commit on `main` | CI green, PR reviewed (self-review counts solo). |
+| `nightly` | Green CI. Everything else is automatic. |
+| alpha | CI green + manual 5-minute smoke test + docs updated for any new user-facing surface. |
+| beta | alpha gate + feature freeze (no `feat:` commits between beta cut and stable) + `cargo bench` run + no open P0 issues. |
+| stable | beta gate + 24h environment soak + hand-written release notes + launch-ready demo GIF or video. |
 
 ### CHANGELOG
 
 - `CHANGELOG.md` lives at repo root.
 - [Keep a Changelog](https://keepachangelog.com/) format.
-- One section per version. `[Unreleased]` at the top.
-- Until v0.1, maintained by hand. After v0.1, generated from Conventional Commits.
+- **Maintained by release-please.** Do not edit by hand; edit commit messages instead.
+- The `[Unreleased]` section reflects commits landed on `main` since the last tag and is rebuilt automatically.
 
 ---
 

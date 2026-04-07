@@ -20,3 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   This is the v0.0 architecture go/no-go: gpui is workable as a crates.io
   dependency on Apple Silicon. Building locally requires Apple's Metal
   Toolchain (`xcodebuild -downloadComponent MetalToolchain`).
+- Trunk-based development with release channels via tags: `nightly`,
+  `alpha`, `beta`, `stable`. Three GitHub Environments (`nightly`,
+  `staging`, `production`) enforce release gates mechanically.
+- Workflows: `release-please` (automated version bumps + changelog),
+  `nightly` (moves the nightly tag on green main), `pr-title`
+  (Conventional Commits validation), `cut-prerelease` (manual alpha/beta
+  cuts), and a standalone `release` workflow for stable releases.
+- README pre-release status badge and honest "pre-alpha" disclaimer.

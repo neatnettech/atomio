@@ -1,0 +1,30 @@
+name: release-please
+
+# Reads Conventional Commits on main and keeps an open release PR that
+# proposes the next version bump and CHANGELOG. Merging that PR is what
+# actually cuts a stable release.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          # Config files drive everything (package name, changelog path,
+          # v0.x bump behavior). See release-please-config.json and
+          # .release-please-manifest.json at the repo root.
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
