@@ -101,7 +101,12 @@ All bound via `actions!` + `KeyBinding::new` in the `atomio` key context. Printa
 4. Run the three checks above.
 5. Smoke-run `cargo run -p atomio` — gpui issues only show up at runtime.
 6. Commit with a Conventional Commit message. PR title must follow the same.
-7. Push the branch and open a PR. Squash-merge.
+7. Push the branch and open a PR with an **explicit** title — GitHub's auto-title comes from the branch name (`feat/caret-and-gutter` → `Feat/caret and gutter`) and will fail the `pr-title` workflow. Use:
+   ```sh
+   gh pr create --title "$(git log -1 --pretty=%s)" --body "..."
+   ```
+   This reuses the first commit's subject, which is already a Conventional Commit if you followed step 6. If you forgot, `gh pr edit <N> --title "..."` fixes it after the fact.
+8. Squash-merge.
 
 ## What NOT to do
 
