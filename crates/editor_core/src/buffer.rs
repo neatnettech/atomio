@@ -106,6 +106,18 @@ impl Buffer {
         }
     }
 
+    /// Return the text of `line` as an owned `String`, excluding any
+    /// trailing newline. Out-of-range lines return an empty string so the
+    /// UI can iterate `0..len_lines()` without bounds-checking every tick.
+    pub fn line_text(&self, line: usize) -> String {
+        if line >= self.rope.len_lines() {
+            return String::new();
+        }
+        let len = self.line_len(line);
+        let start = self.rope.line_to_char(line);
+        self.rope.slice(start..start + len).to_string()
+    }
+
     pub fn insert(&mut self, char_idx: usize, text: &str) {
         self.rope.insert(char_idx, text);
         self.dirty = true;
@@ -177,6 +189,27 @@ mod tests {
         assert_eq!(b.line_col(4), (1, 0)); // start of "two"
         assert_eq!(b.line_col(8), (2, 0)); // start of "three"
         assert_eq!(b.line_col(13), (2, 5));
+    }
+
+    #[test]
+    fn line_text_strips_trailing_newline() {
+        let b: Buffer = "one\ntwo\nthree".parse().unwrap();
+        assert_eq!(b.line_text(0), "one");
+        assert_eq!(b.line_text(1), "two");
+        assert_eq!(b.line_text(2), "three");
+        // Out of range is empty, not a panic.
+        assert_eq!(b.line_text(99), "");
+    }
+
+    #[test]
+    fn line_text_empty_trailing_line() {
+        // A trailing '\n' produces an extra empty line in ropey's model —
+        // the UI renders it as a blank row, so we need it to come back as
+        // an empty string not a panic.
+        let b: Buffer = "one\n".parse().unwrap();
+        assert_eq!(b.len_lines(), 2);
+        assert_eq!(b.line_text(0), "one");
+        assert_eq!(b.line_text(1), "");
     }
 
     #[test]

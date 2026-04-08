@@ -64,15 +64,22 @@ impl AtomioWindow {
         format!("ln {} · col {}", line + 1, col + 1).into()
     }
 
-    /// Render the buffer as a stack of line divs. Kept deliberately simple:
-    /// no caret glyph, no syntax highlighting, no scroll — that's the job
-    /// of `editor_view` in v0.1.
-    fn buffer_lines(&self) -> Vec<SharedString> {
-        let text = self.state.buffer.to_string();
-        if text.is_empty() {
-            return vec!["".into()];
-        }
-        text.split('\n').map(|l| l.to_string().into()).collect()
+    /// Build a per-line view of the buffer for rendering. Each entry is a
+    /// `(line_number_1_based, text, caret_col)` triple; `caret_col` is
+    /// `Some` on the single line where the caret currently is. Split as a
+    /// pure helper so the rendering logic stays trivially inspectable and
+    /// we can add tests if the shape ever gets hairy.
+    fn buffer_line_views(&self) -> Vec<(usize, String, Option<usize>)> {
+        let buffer = &self.state.buffer;
+        let (cursor_line, cursor_col) = self.state.cursor_line_col();
+        let line_count = buffer.len_lines().max(1);
+        (0..line_count)
+            .map(|i| {
+                let text = buffer.line_text(i);
+                let caret = (i == cursor_line).then_some(cursor_col);
+                (i + 1, text, caret)
+            })
+            .collect()
     }
 
     // --- action handlers --------------------------------------------------
@@ -210,7 +217,13 @@ impl Focusable for AtomioWindow {
 
 impl Render for AtomioWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let lines = self.buffer_lines();
+        let line_views = self.buffer_line_views();
+        let gutter_width = {
+            // One extra char of padding so a 3-digit line number doesn't
+            // touch the separator.
+            let digits = line_views.len().max(1).to_string().len();
+            px(((digits + 1) * 10) as f32)
+        };
         let subtitle = self.subtitle();
         let cursor = self.cursor_label();
         let status = self.status.clone();
@@ -246,19 +259,47 @@ impl Render for AtomioWindow {
                     .child(div().text_sm().text_color(rgb(0xf5e0dc)).child(title))
                     .child(div().text_xs().text_color(rgb(0x9399b2)).child(subtitle)),
             )
-            // Buffer
+            // Buffer pane: gutter + text
             .child(
                 div()
                     .flex_1()
-                    .p_4()
+                    .py_4()
                     .flex()
                     .flex_col()
                     .text_color(rgb(0xa6e3a1))
-                    .children(
-                        lines
-                            .into_iter()
-                            .map(|l| div().child(if l.is_empty() { " ".into() } else { l })),
-                    ),
+                    .children(line_views.into_iter().map(move |(num, text, caret)| {
+                        // Each row: [ gutter ][ line text, maybe with caret ]
+                        let gutter = div()
+                            .w(gutter_width)
+                            .pr_2()
+                            .flex()
+                            .justify_end()
+                            .text_color(rgb(0x6c7086))
+                            .child(format!("{num}"));
+
+                        let line_body: gpui::Div = match caret {
+                            Some(col) => {
+                                // Split the line at the caret column and
+                                // insert a thin coloured div between the
+                                // halves.
+                                let (before, after) = split_at_char(&text, col);
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .child(div().child(before))
+                                    .child(div().w(px(2.0)).h(px(18.0)).bg(rgb(0xf5e0dc)))
+                                    .child(div().child(after))
+                            }
+                            None => {
+                                // Render a non-breaking space for empty
+                                // lines so the row still has height.
+                                let display = if text.is_empty() { " ".into() } else { text };
+                                div().child(display)
+                            }
+                        };
+
+                        div().flex().flex_row().child(gutter).child(line_body)
+                    })),
             )
             // Footer / status line
             .child(
@@ -274,6 +315,18 @@ impl Render for AtomioWindow {
                     .child(div().child(cursor)),
             )
     }
+}
+
+/// Split a string at a character (not byte) index and return the two halves
+/// as owned `String`s. Column math in `editor_core` is char-based, so the
+/// UI has to be too.
+fn split_at_char(s: &str, char_idx: usize) -> (String, String) {
+    let split_byte = s
+        .char_indices()
+        .nth(char_idx)
+        .map(|(b, _)| b)
+        .unwrap_or(s.len());
+    (s[..split_byte].to_string(), s[split_byte..].to_string())
 }
 
 fn load_initial_buffer() -> Buffer {
@@ -331,4 +384,32 @@ fn main() {
 
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_at_char;
+
+    #[test]
+    fn split_at_char_ascii() {
+        let (a, b) = split_at_char("hello", 2);
+        assert_eq!(a, "he");
+        assert_eq!(b, "llo");
+    }
+
+    #[test]
+    fn split_at_char_past_end_is_clamped() {
+        let (a, b) = split_at_char("hi", 99);
+        assert_eq!(a, "hi");
+        assert_eq!(b, "");
+    }
+
+    #[test]
+    fn split_at_char_multibyte() {
+        // "é" is two bytes, one char — splitting at char index 1 must
+        // return bytes for one codepoint, not one byte.
+        let (a, b) = split_at_char("é!", 1);
+        assert_eq!(a, "é");
+        assert_eq!(b, "!");
+    }
 }
