@@ -171,6 +171,27 @@ Brief description of the approach. Call out anything non-obvious.
 (for anything user-visible)
 ```
 
+### Opening a PR
+
+**Always pass `--title` explicitly.** GitHub's default auto-title comes from the branch name (`feat/caret-and-gutter` becomes `Feat/caret and gutter`), which is not a Conventional Commit and will fail the `pr-title` workflow. The canonical flow is:
+
+```sh
+git push -u origin feat/<thing>
+gh pr create --title "$(git log -1 --pretty=%s)" --body "$(cat <<'EOF'
+## What
+...
+
+## Why
+...
+
+## Test plan
+- [ ] cargo test --workspace
+EOF
+)"
+```
+
+The `--title "$(git log -1 --pretty=%s)"` trick reuses the first commit's subject. If your first commit message is a valid Conventional Commit (which it should be — see §3), so is the PR title, automatically. If you forget and the auto-title has already been set, `gh pr edit <N> --title "..."` fixes it and the `pr-title` check re-runs on the next sync.
+
 ### Merging rules
 
 - CI must be green.
