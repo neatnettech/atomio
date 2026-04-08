@@ -1382,6 +1382,7 @@ name = "editor_core"
 version = "0.0.0"
 dependencies = [
  "ropey",
+ "tempfile",
 ]
 
 [[package]]

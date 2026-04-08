@@ -1,9 +1,15 @@
 //! atomio — entry point.
 //!
-//! v0.0 spike: opens a single gpui window with the project banner so we can
-//! validate the renderer end-to-end on Apple Silicon. The "real" editor view
-//! that backs this window will land on top of `editor_core` in subsequent
-//! commits (see docs/ROADMAP.md, v0.0 → v0.1).
+//! v0.0 spike: opens a single gpui window that displays a file loaded from
+//! disk. The file comes from (in priority order):
+//!   1. a path passed on the command line (`atomio path/to/file`),
+//!   2. a built-in greeting buffer, used when no path is given.
+//!
+//! The native open/save dialogs land once we have keybindings and can
+//! trigger `rfd` from inside the gpui run loop — calling it before gpui
+//! initializes NSApplication crashes AppKit on macOS.
+
+use std::path::PathBuf;
 
 use editor_core::Buffer;
 use gpui::{
@@ -13,6 +19,7 @@ use gpui::{
 
 struct AtomioWindow {
     title: SharedString,
+    subtitle: SharedString,
     buffer_preview: SharedString,
 }
 
@@ -33,7 +40,7 @@ impl Render for AtomioWindow {
                     .text_color(rgb(0xf5e0dc))
                     .child(self.title.clone()),
             )
-            .child(div().text_sm().child("hackable to the core. again."))
+            .child(div().text_sm().child(self.subtitle.clone()))
             .child(
                 div()
                     .mt_4()
@@ -46,12 +53,42 @@ impl Render for AtomioWindow {
     }
 }
 
-fn main() {
-    // Exercise editor_core so the window content reflects a real Buffer
-    // round-trip — the smallest possible "editor + view" handshake.
+/// Resolve the buffer atomio should open on startup.
+fn load_initial_buffer() -> Buffer {
+    if let Some(path) = std::env::args().nth(1).map(PathBuf::from) {
+        match Buffer::open(&path) {
+            Ok(buf) => return buf,
+            Err(e) => eprintln!("atomio: failed to open {}: {e}", path.display()),
+        }
+    }
+
+    // Fallback — show the banner buffer so v0.0 is still runnable without
+    // an on-disk file, useful for smoke-testing the renderer.
     let mut buf: Buffer = "hello".parse().expect("FromStr<Buffer> is infallible");
     buf.insert(5, ", atomio");
-    let preview = buf.to_string();
+    buf
+}
+
+/// Truncate long files to a preview the v0.0 label can render. A real editor
+/// view lands in v0.1.
+fn preview_of(buf: &Buffer) -> String {
+    const MAX: usize = 240;
+    let full = buf.to_string();
+    if full.chars().count() <= MAX {
+        full
+    } else {
+        let truncated: String = full.chars().take(MAX).collect();
+        format!("{truncated}...")
+    }
+}
+
+fn main() {
+    let buf = load_initial_buffer();
+    let preview = preview_of(&buf);
+    let subtitle = match buf.path() {
+        Some(p) => format!("{}", p.display()),
+        None => "hackable to the core. again.".into(),
+    };
 
     Application::new().run(move |cx| {
         let bounds = Bounds::centered(None, size(px(720.0), px(480.0)), cx);
@@ -63,6 +100,7 @@ fn main() {
             |_, cx| {
                 cx.new(|_| AtomioWindow {
                     title: format!("atomio v{}", env!("CARGO_PKG_VERSION")).into(),
+                    subtitle: subtitle.clone().into(),
                     buffer_preview: preview.clone().into(),
                 })
             },
