@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 ropey.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
