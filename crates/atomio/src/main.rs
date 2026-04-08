@@ -1,24 +1,40 @@
 //! atomio — entry point.
 //!
-//! v0.0 spike: opens a single gpui window backed by an `editor_core::Buffer`.
-//! The initial buffer comes from a CLI path if given, otherwise a greeting.
-//! Cmd+O opens a native file dialog; Cmd+S saves (falling back to save-as
-//! when the buffer has no path yet).
+//! v0.0 spike: opens a single gpui window backed by an
+//! [`editor_core::EditorState`]. Supports text entry, cursor movement,
+//! backspace, undo/redo, file open, and save.
 //!
-//! Actual text editing / cursor movement lands with the next milestone.
+//! All editing rules live in `editor_core::state` — this file is only
+//! responsible for translating gpui input events into state ops and for
+//! rendering the buffer. That split keeps the interesting logic
+//! unit-testable and the UI layer trivially replaceable.
 
 use std::path::PathBuf;
 
-use editor_core::Buffer;
+use editor_core::{Buffer, EditorState};
 use gpui::{
     actions, div, prelude::*, px, rgb, size, Application, Bounds, Context, FocusHandle, Focusable,
-    KeyBinding, Render, SharedString, Window, WindowBounds, WindowOptions,
+    KeyBinding, KeyDownEvent, Render, SharedString, Window, WindowBounds, WindowOptions,
 };
 
-actions!(atomio, [OpenFile, SaveFile]);
+actions!(
+    atomio,
+    [
+        OpenFile,
+        SaveFile,
+        MoveLeft,
+        MoveRight,
+        MoveUp,
+        MoveDown,
+        Backspace,
+        DeleteForward,
+        Undo,
+        Redo,
+    ]
+);
 
 struct AtomioWindow {
-    buffer: Buffer,
+    state: EditorState,
     status: SharedString,
     focus_handle: FocusHandle,
 }
@@ -29,25 +45,37 @@ impl AtomioWindow {
     }
 
     fn subtitle(&self) -> SharedString {
-        match self.buffer.path() {
+        match self.state.buffer.path() {
             Some(p) => {
-                let suffix = if self.buffer.is_dirty() { " •" } else { "" };
+                let suffix = if self.state.buffer.is_dirty() {
+                    " •"
+                } else {
+                    ""
+                };
                 format!("{}{suffix}", p.display()).into()
             }
             None => "hackable to the core. again.".into(),
         }
     }
 
-    fn preview(&self) -> SharedString {
-        const MAX: usize = 240;
-        let full = self.buffer.to_string();
-        if full.chars().count() <= MAX {
-            full.into()
-        } else {
-            let truncated: String = full.chars().take(MAX).collect();
-            format!("{truncated}...").into()
-        }
+    fn cursor_label(&self) -> SharedString {
+        let (line, col) = self.state.cursor_line_col();
+        // 1-based for humans.
+        format!("ln {} · col {}", line + 1, col + 1).into()
     }
+
+    /// Render the buffer as a stack of line divs. Kept deliberately simple:
+    /// no caret glyph, no syntax highlighting, no scroll — that's the job
+    /// of `editor_view` in v0.1.
+    fn buffer_lines(&self) -> Vec<SharedString> {
+        let text = self.state.buffer.to_string();
+        if text.is_empty() {
+            return vec!["".into()];
+        }
+        text.split('\n').map(|l| l.to_string().into()).collect()
+    }
+
+    // --- action handlers --------------------------------------------------
 
     fn on_open(&mut self, _: &OpenFile, _window: &mut Window, cx: &mut Context<Self>) {
         self.status = "opening…".into();
@@ -68,7 +96,7 @@ impl AtomioWindow {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(buf) => {
-                        this.buffer = buf;
+                        this.state.replace_buffer(buf);
                         this.status = format!("opened {}", path.display()).into();
                     }
                     Err(e) => {
@@ -82,23 +110,15 @@ impl AtomioWindow {
     }
 
     fn on_save(&mut self, _: &SaveFile, _window: &mut Window, cx: &mut Context<Self>) {
-        // If we already have a path, write synchronously — the call is
-        // just an fs::write and cannot pump AppKit.
-        if self.buffer.path().is_some() {
-            match self.buffer.save() {
-                Ok(()) => {
-                    self.status = "saved".into();
-                    cx.notify();
-                }
-                Err(e) => {
-                    self.status = format!("save failed: {e}").into();
-                    cx.notify();
-                }
-            }
+        if self.state.buffer.path().is_some() {
+            self.status = match self.state.buffer.save() {
+                Ok(()) => "saved".into(),
+                Err(e) => format!("save failed: {e}").into(),
+            };
+            cx.notify();
             return;
         }
 
-        // Otherwise route through the native save dialog, async.
         self.status = "saving…".into();
         cx.spawn(async move |this, cx| {
             let picked = rfd::AsyncFileDialog::new()
@@ -114,18 +134,71 @@ impl AtomioWindow {
             };
             let path = file.path().to_path_buf();
             let _ = this.update(cx, |this, cx| {
-                match this.buffer.save_as(&path) {
-                    Ok(()) => {
-                        this.status = format!("saved to {}", path.display()).into();
-                    }
-                    Err(e) => {
-                        this.status = format!("save failed: {e}").into();
-                    }
-                }
+                this.status = match this.state.buffer.save_as(&path) {
+                    Ok(()) => format!("saved to {}", path.display()).into(),
+                    Err(e) => format!("save failed: {e}").into(),
+                };
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    fn on_move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.move_left();
+        cx.notify();
+    }
+    fn on_move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.move_right();
+        cx.notify();
+    }
+    fn on_move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.move_up();
+        cx.notify();
+    }
+    fn on_move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.move_down();
+        cx.notify();
+    }
+    fn on_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.backspace();
+        cx.notify();
+    }
+    fn on_delete_forward(&mut self, _: &DeleteForward, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.delete_forward();
+        cx.notify();
+    }
+    fn on_undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.undo();
+        cx.notify();
+    }
+    fn on_redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.redo();
+        cx.notify();
+    }
+
+    /// Catch-all: any key_down the action system did not consume. We use
+    /// this exclusively for printable characters — the non-printable keys
+    /// (arrows, backspace, cmd+*) are bound as actions and short-circuit
+    /// before we get here.
+    fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        // Ignore anything with a modifier other than shift — those are either
+        // already-bound actions (cmd+*) or shortcuts we don't own yet.
+        let m = &keystroke.modifiers;
+        if m.control || m.alt || m.platform || m.function {
+            return;
+        }
+        let Some(text) = keystroke.key_char.as_deref() else {
+            return;
+        };
+        // Tab / enter arrive as key_char; printable ASCII too. Filter out
+        // pure-control bytes so a stray escape doesn't sneak in.
+        if text.is_empty() {
+            return;
+        }
+        self.state.insert_str(text);
+        cx.notify();
     }
 }
 
@@ -137,40 +210,68 @@ impl Focusable for AtomioWindow {
 
 impl Render for AtomioWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let lines = self.buffer_lines();
+        let subtitle = self.subtitle();
+        let cursor = self.cursor_label();
+        let status = self.status.clone();
+        let title = self.title();
+
         div()
             .key_context("atomio")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_open))
             .on_action(cx.listener(Self::on_save))
+            .on_action(cx.listener(Self::on_move_left))
+            .on_action(cx.listener(Self::on_move_right))
+            .on_action(cx.listener(Self::on_move_up))
+            .on_action(cx.listener(Self::on_move_down))
+            .on_action(cx.listener(Self::on_backspace))
+            .on_action(cx.listener(Self::on_delete_forward))
+            .on_action(cx.listener(Self::on_undo))
+            .on_action(cx.listener(Self::on_redo))
+            .on_key_down(cx.listener(Self::on_key_down))
             .flex()
             .flex_col()
-            .gap_4()
             .size_full()
             .bg(rgb(0x1e1e2e))
-            .justify_center()
-            .items_center()
             .text_color(rgb(0xcdd6f4))
+            // Header
             .child(
                 div()
-                    .text_2xl()
-                    .text_color(rgb(0xf5e0dc))
-                    .child(self.title()),
-            )
-            .child(div().text_sm().child(self.subtitle()))
-            .child(
-                div()
-                    .mt_4()
+                    .flex()
+                    .flex_col()
                     .px_4()
                     .py_2()
-                    .bg(rgb(0x313244))
-                    .text_color(rgb(0xa6e3a1))
-                    .child(self.preview()),
+                    .bg(rgb(0x181825))
+                    .child(div().text_sm().text_color(rgb(0xf5e0dc)).child(title))
+                    .child(div().text_xs().text_color(rgb(0x9399b2)).child(subtitle)),
             )
+            // Buffer
             .child(
                 div()
+                    .flex_1()
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .text_color(rgb(0xa6e3a1))
+                    .children(
+                        lines
+                            .into_iter()
+                            .map(|l| div().child(if l.is_empty() { " ".into() } else { l })),
+                    ),
+            )
+            // Footer / status line
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .px_4()
+                    .py_1()
+                    .bg(rgb(0x181825))
                     .text_xs()
                     .text_color(rgb(0x6c7086))
-                    .child(self.status.clone()),
+                    .child(div().child(status))
+                    .child(div().child(cursor)),
             )
     }
 }
@@ -194,6 +295,14 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("cmd-o", OpenFile, Some("atomio")),
             KeyBinding::new("cmd-s", SaveFile, Some("atomio")),
+            KeyBinding::new("left", MoveLeft, Some("atomio")),
+            KeyBinding::new("right", MoveRight, Some("atomio")),
+            KeyBinding::new("up", MoveUp, Some("atomio")),
+            KeyBinding::new("down", MoveDown, Some("atomio")),
+            KeyBinding::new("backspace", Backspace, Some("atomio")),
+            KeyBinding::new("delete", DeleteForward, Some("atomio")),
+            KeyBinding::new("cmd-z", Undo, Some("atomio")),
+            KeyBinding::new("cmd-shift-z", Redo, Some("atomio")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(720.0), px(480.0)), cx);
@@ -204,16 +313,16 @@ fn main() {
                     ..Default::default()
                 },
                 |_window, cx| {
+                    let state = EditorState::new(buffer.clone());
                     cx.new(|cx| AtomioWindow {
-                        buffer: buffer.clone(),
-                        status: "cmd+o to open · cmd+s to save".into(),
+                        state,
+                        status: "type to edit · cmd+o open · cmd+s save · cmd+z undo".into(),
                         focus_handle: cx.focus_handle(),
                     })
                 },
             )
             .expect("failed to open atomio window");
 
-        // Give the view keyboard focus so key bindings actually fire.
         window
             .update(cx, |view, window, _cx| {
                 window.focus(&view.focus_handle);
