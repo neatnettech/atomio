@@ -17,13 +17,16 @@ atomio/
 │   ├── atomio/                 # macOS app entry — gpui window + key handlers
 │   │   ├── Cargo.toml
 │   │   └── src/main.rs
-│   └── editor_core/            # buffer + selection + state model (no GUI)
+│   ├── editor_core/            # buffer + selection + state model (no GUI)
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs          # module declarations + re-exports only
+│   │       ├── buffer.rs       # ropey wrapper, on-disk identity, line/col math
+│   │       ├── selection.rs    # cursor/selection primitive
+│   │       └── state.rs        # EditorState: buffer + selection + undo/redo
+│   └── language/               # tree-sitter parsing + token classification
 │       ├── Cargo.toml
-│       └── src/
-│           ├── lib.rs          # module declarations + re-exports only
-│           ├── buffer.rs       # ropey wrapper, on-disk identity, line/col math
-│           ├── selection.rs    # cursor/selection primitive
-│           └── state.rs        # EditorState: buffer + selection + undo/redo
+│       └── src/lib.rs          # highlight_rust(&str) -> Vec<Span>
 ├── docs/
 │   ├── ROADMAP.md              # milestones v0.0 → v1.0 + won't-do list
 │   ├── dev-practices.md        # branching, versioning, CI policy
@@ -37,7 +40,7 @@ atomio/
 └── CHANGELOG.md
 ```
 
-Crates that **don't exist yet** but appear in the roadmap (do not invent files for these without asking): `editor_view`, `language`, `ai`, `ext_host_node`, `workspace`, `theme`, `sdk-ts`.
+Crates that **don't exist yet** but appear in the roadmap (do not invent files for these without asking): `editor_view`, `ai`, `ext_host_node`, `workspace`, `theme`, `sdk-ts`.
 
 ## Architecture rules
 

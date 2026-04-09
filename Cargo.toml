@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/atomio",
     "crates/editor_core",
+    "crates/language",
 ]
 
 [workspace.package]
@@ -14,4 +15,5 @@ rust-version = "1.75"
 
 [workspace.dependencies]
 editor_core = { path = "crates/editor_core" }
+language = { path = "crates/language" }
 ropey = "1.6"
