@@ -26,12 +26,29 @@ actions!(
         MoveRight,
         MoveUp,
         MoveDown,
+        MoveLineStart,
+        MoveLineEnd,
+        MoveLeftExtending,
+        MoveRightExtending,
+        MoveUpExtending,
+        MoveDownExtending,
+        MoveLineStartExtending,
+        MoveLineEndExtending,
+        SelectAll,
         Backspace,
         DeleteForward,
         Undo,
         Redo,
     ]
 );
+
+struct LineView {
+    number: usize,
+    text: String,
+    caret: Option<usize>,
+    /// `(start_col, end_col)` character range selected on this line, if any.
+    selection: Option<(usize, usize)>,
+}
 
 struct AtomioWindow {
     state: EditorState,
@@ -65,19 +82,38 @@ impl AtomioWindow {
     }
 
     /// Build a per-line view of the buffer for rendering. Each entry is a
-    /// `(line_number_1_based, text, caret_col)` triple; `caret_col` is
-    /// `Some` on the single line where the caret currently is. Split as a
-    /// pure helper so the rendering logic stays trivially inspectable and
-    /// we can add tests if the shape ever gets hairy.
-    fn buffer_line_views(&self) -> Vec<(usize, String, Option<usize>)> {
+    /// `LineView` holding the 1-based line number, the raw text, an optional
+    /// caret column, and an optional selection column range on this line.
+    fn buffer_line_views(&self) -> Vec<LineView> {
         let buffer = &self.state.buffer;
         let (cursor_line, cursor_col) = self.state.cursor_line_col();
         let line_count = buffer.len_lines().max(1);
+        let sel = &self.state.selection;
+        let sel_range = sel.range();
+        let sel_active = !sel.is_caret();
         (0..line_count)
             .map(|i| {
                 let text = buffer.line_text(i);
                 let caret = (i == cursor_line).then_some(cursor_col);
-                (i + 1, text, caret)
+                let selection = if sel_active {
+                    let line_start = buffer.line_to_char(i);
+                    let line_end = line_start + buffer.line_len(i);
+                    let lo = sel_range.start.max(line_start);
+                    let hi = sel_range.end.min(line_end);
+                    if lo < hi {
+                        Some((lo - line_start, hi - line_start))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                LineView {
+                    number: i + 1,
+                    text,
+                    caret,
+                    selection,
+                }
             })
             .collect()
     }
@@ -167,6 +203,57 @@ impl AtomioWindow {
         self.state.move_down();
         cx.notify();
     }
+    fn on_move_line_start(&mut self, _: &MoveLineStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.move_line_start();
+        cx.notify();
+    }
+    fn on_move_line_end(&mut self, _: &MoveLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.move_line_end();
+        cx.notify();
+    }
+    fn on_move_left_ext(&mut self, _: &MoveLeftExtending, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.move_left_extending();
+        cx.notify();
+    }
+    fn on_move_right_ext(
+        &mut self,
+        _: &MoveRightExtending,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.move_right_extending();
+        cx.notify();
+    }
+    fn on_move_up_ext(&mut self, _: &MoveUpExtending, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.move_up_extending();
+        cx.notify();
+    }
+    fn on_move_down_ext(&mut self, _: &MoveDownExtending, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.move_down_extending();
+        cx.notify();
+    }
+    fn on_move_line_start_ext(
+        &mut self,
+        _: &MoveLineStartExtending,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.move_line_start_extending();
+        cx.notify();
+    }
+    fn on_move_line_end_ext(
+        &mut self,
+        _: &MoveLineEndExtending,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.move_line_end_extending();
+        cx.notify();
+    }
+    fn on_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.select_all();
+        cx.notify();
+    }
     fn on_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
         self.state.backspace();
         cx.notify();
@@ -238,6 +325,15 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_move_right))
             .on_action(cx.listener(Self::on_move_up))
             .on_action(cx.listener(Self::on_move_down))
+            .on_action(cx.listener(Self::on_move_line_start))
+            .on_action(cx.listener(Self::on_move_line_end))
+            .on_action(cx.listener(Self::on_move_left_ext))
+            .on_action(cx.listener(Self::on_move_right_ext))
+            .on_action(cx.listener(Self::on_move_up_ext))
+            .on_action(cx.listener(Self::on_move_down_ext))
+            .on_action(cx.listener(Self::on_move_line_start_ext))
+            .on_action(cx.listener(Self::on_move_line_end_ext))
+            .on_action(cx.listener(Self::on_select_all))
             .on_action(cx.listener(Self::on_backspace))
             .on_action(cx.listener(Self::on_delete_forward))
             .on_action(cx.listener(Self::on_undo))
@@ -267,38 +363,80 @@ impl Render for AtomioWindow {
                     .flex()
                     .flex_col()
                     .text_color(rgb(0xa6e3a1))
-                    .children(line_views.into_iter().map(move |(num, text, caret)| {
-                        // Each row: [ gutter ][ line text, maybe with caret ]
+                    .children(line_views.into_iter().map(move |lv| {
+                        let LineView {
+                            number,
+                            text,
+                            caret,
+                            selection,
+                        } = lv;
                         let gutter = div()
                             .w(gutter_width)
                             .pr_2()
                             .flex()
                             .justify_end()
                             .text_color(rgb(0x6c7086))
-                            .child(format!("{num}"));
+                            .child(format!("{number}"));
 
-                        let line_body: gpui::Div = match caret {
-                            Some(col) => {
-                                // Split the line at the caret column and
-                                // insert a thin coloured div between the
-                                // halves.
-                                let (before, after) = split_at_char(&text, col);
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .child(div().child(before))
-                                    .child(div().w(px(2.0)).h(px(18.0)).bg(rgb(0xf5e0dc)))
-                                    .child(div().child(after))
-                            }
-                            None => {
-                                // Render a non-breaking space for empty
-                                // lines so the row still has height.
-                                let display = if text.is_empty() { " ".into() } else { text };
-                                div().child(display)
-                            }
+                        // Split the line into up to three segments based on
+                        // the selection range, then overlay the caret by
+                        // splitting again at the caret column. We render the
+                        // selected segment with a tinted background.
+                        let mut row = div().flex().flex_row();
+                        let (sel_start, sel_end) = selection.unwrap_or((0, 0));
+                        let has_sel = selection.is_some();
+                        let caret_col = caret;
+
+                        // Build segments: (text, is_selected).
+                        let segments: Vec<(String, bool)> = if has_sel {
+                            let (a, rest) = split_at_char(&text, sel_start);
+                            let (b, c) = split_at_char(&rest, sel_end - sel_start);
+                            vec![(a, false), (b, true), (c, false)]
+                        } else {
+                            vec![(text.clone(), false)]
                         };
 
-                        div().flex().flex_row().child(gutter).child(line_body)
+                        // Emit each segment, inserting the caret line where
+                        // it falls. Caret col is absolute within the line.
+                        let mut consumed = 0usize;
+                        for (seg_text, selected) in segments {
+                            let seg_len = seg_text.chars().count();
+                            let seg_start = consumed;
+                            let seg_end = consumed + seg_len;
+                            consumed = seg_end;
+
+                            let caret_here = caret_col
+                                .filter(|c| *c >= seg_start && *c <= seg_end)
+                                .map(|c| c - seg_start);
+
+                            let bg = if selected {
+                                rgb(0x45475a)
+                            } else {
+                                rgb(0x1e1e2e)
+                            };
+
+                            match caret_here {
+                                Some(cc) => {
+                                    let (before, after) = split_at_char(&seg_text, cc);
+                                    row = row
+                                        .child(div().bg(bg).child(before))
+                                        .child(div().w(px(2.0)).h(px(18.0)).bg(rgb(0xf5e0dc)))
+                                        .child(div().bg(bg).child(after));
+                                }
+                                None => {
+                                    if !seg_text.is_empty() {
+                                        row = row.child(div().bg(bg).child(seg_text));
+                                    }
+                                }
+                            }
+                        }
+
+                        // Empty line with no caret still needs height.
+                        if consumed == 0 && caret_col.is_none() {
+                            row = row.child(div().child(" "));
+                        }
+
+                        div().flex().flex_row().child(gutter).child(row)
                     })),
             )
             // Footer / status line
@@ -352,6 +490,19 @@ fn main() {
             KeyBinding::new("right", MoveRight, Some("atomio")),
             KeyBinding::new("up", MoveUp, Some("atomio")),
             KeyBinding::new("down", MoveDown, Some("atomio")),
+            KeyBinding::new("home", MoveLineStart, Some("atomio")),
+            KeyBinding::new("end", MoveLineEnd, Some("atomio")),
+            KeyBinding::new("cmd-left", MoveLineStart, Some("atomio")),
+            KeyBinding::new("cmd-right", MoveLineEnd, Some("atomio")),
+            KeyBinding::new("shift-left", MoveLeftExtending, Some("atomio")),
+            KeyBinding::new("shift-right", MoveRightExtending, Some("atomio")),
+            KeyBinding::new("shift-up", MoveUpExtending, Some("atomio")),
+            KeyBinding::new("shift-down", MoveDownExtending, Some("atomio")),
+            KeyBinding::new("shift-home", MoveLineStartExtending, Some("atomio")),
+            KeyBinding::new("shift-end", MoveLineEndExtending, Some("atomio")),
+            KeyBinding::new("cmd-shift-left", MoveLineStartExtending, Some("atomio")),
+            KeyBinding::new("cmd-shift-right", MoveLineEndExtending, Some("atomio")),
+            KeyBinding::new("cmd-a", SelectAll, Some("atomio")),
             KeyBinding::new("backspace", Backspace, Some("atomio")),
             KeyBinding::new("delete", DeleteForward, Some("atomio")),
             KeyBinding::new("cmd-z", Undo, Some("atomio")),

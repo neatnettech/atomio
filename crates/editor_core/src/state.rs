@@ -154,43 +154,117 @@ impl EditorState {
         self.redo.clear();
     }
 
-    /// Move the caret one character left. Drops any active selection.
-    pub fn move_left(&mut self) {
-        let head = self.selection.head.saturating_sub(1);
-        self.selection = Selection::caret(head);
+    /// Move the caret to `new_head`. When `extend` is true the anchor is
+    /// preserved (growing / shrinking the selection); when false the
+    /// selection collapses to a caret at the new position.
+    fn set_head(&mut self, new_head: usize, extend: bool) {
+        let new_head = new_head.min(self.buffer.len_chars());
+        if extend {
+            self.selection.head = new_head;
+        } else {
+            self.selection = Selection::caret(new_head);
+        }
     }
 
-    /// Move the caret one character right, clamped to buffer length.
-    pub fn move_right(&mut self) {
-        let head = (self.selection.head + 1).min(self.buffer.len_chars());
-        self.selection = Selection::caret(head);
+    fn head_line_left(&self) -> usize {
+        self.selection.head.saturating_sub(1)
     }
 
-    /// Move the caret one visual line up, preserving column when possible.
-    pub fn move_up(&mut self) {
+    fn head_line_right(&self) -> usize {
+        self.selection.head + 1
+    }
+
+    fn head_line_up(&self) -> usize {
         let (line, col) = self.buffer.line_col(self.selection.head);
         if line == 0 {
-            self.selection = Selection::caret(0);
-            return;
+            return 0;
         }
         let target_line = line - 1;
         let line_start = self.buffer.line_to_char(target_line);
         let clamped_col = col.min(self.buffer.line_len(target_line));
-        self.selection = Selection::caret(line_start + clamped_col);
+        line_start + clamped_col
     }
 
-    /// Move the caret one visual line down, preserving column when possible.
-    pub fn move_down(&mut self) {
+    fn head_line_down(&self) -> usize {
         let (line, col) = self.buffer.line_col(self.selection.head);
         let last_line = self.buffer.len_lines().saturating_sub(1);
         if line >= last_line {
-            self.selection = Selection::caret(self.buffer.len_chars());
-            return;
+            return self.buffer.len_chars();
         }
         let target_line = line + 1;
         let line_start = self.buffer.line_to_char(target_line);
         let clamped_col = col.min(self.buffer.line_len(target_line));
-        self.selection = Selection::caret(line_start + clamped_col);
+        line_start + clamped_col
+    }
+
+    fn head_line_start(&self) -> usize {
+        let (line, _) = self.buffer.line_col(self.selection.head);
+        self.buffer.line_to_char(line)
+    }
+
+    fn head_line_end(&self) -> usize {
+        let (line, _) = self.buffer.line_col(self.selection.head);
+        self.buffer.line_to_char(line) + self.buffer.line_len(line)
+    }
+
+    // --- non-extending moves: collapse to caret -------------------------
+
+    pub fn move_left(&mut self) {
+        self.set_head(self.head_line_left(), false);
+    }
+
+    pub fn move_right(&mut self) {
+        self.set_head(self.head_line_right(), false);
+    }
+
+    pub fn move_up(&mut self) {
+        self.set_head(self.head_line_up(), false);
+    }
+
+    pub fn move_down(&mut self) {
+        self.set_head(self.head_line_down(), false);
+    }
+
+    pub fn move_line_start(&mut self) {
+        self.set_head(self.head_line_start(), false);
+    }
+
+    pub fn move_line_end(&mut self) {
+        self.set_head(self.head_line_end(), false);
+    }
+
+    // --- extending moves: preserve anchor -------------------------------
+
+    pub fn move_left_extending(&mut self) {
+        self.set_head(self.head_line_left(), true);
+    }
+
+    pub fn move_right_extending(&mut self) {
+        self.set_head(self.head_line_right(), true);
+    }
+
+    pub fn move_up_extending(&mut self) {
+        self.set_head(self.head_line_up(), true);
+    }
+
+    pub fn move_down_extending(&mut self) {
+        self.set_head(self.head_line_down(), true);
+    }
+
+    pub fn move_line_start_extending(&mut self) {
+        self.set_head(self.head_line_start(), true);
+    }
+
+    pub fn move_line_end_extending(&mut self) {
+        self.set_head(self.head_line_end(), true);
+    }
+
+    /// Select the entire buffer.
+    pub fn select_all(&mut self) {
+        self.selection = Selection {
+            anchor: 0,
+            head: self.buffer.len_chars(),
+        };
     }
 
     pub fn undo(&mut self) {
@@ -319,6 +393,52 @@ mod tests {
         st.replace_buffer("other".parse().unwrap());
         st.undo();
         assert_eq!(st.buffer.to_string(), "other");
+    }
+
+    #[test]
+    fn extending_move_grows_and_collapses() {
+        let mut st = state_from("hello");
+        st.move_right_extending();
+        st.move_right_extending();
+        assert_eq!(st.selection.anchor, 0);
+        assert_eq!(st.selection.head, 2);
+        st.move_left_extending();
+        assert_eq!(st.selection.head, 1);
+        st.move_right(); // non-extending collapses
+        assert!(st.selection.is_caret());
+        assert_eq!(st.selection.head, 2);
+    }
+
+    #[test]
+    fn select_all_spans_buffer() {
+        let mut st = state_from("abc\ndef");
+        st.select_all();
+        assert_eq!(st.selection.anchor, 0);
+        assert_eq!(st.selection.head, 7);
+    }
+
+    #[test]
+    fn line_start_end_moves() {
+        let mut st = state_from("abc\ndef");
+        for _ in 0..5 {
+            st.move_right();
+        }
+        assert_eq!(st.cursor_line_col(), (1, 1));
+        st.move_line_start();
+        assert_eq!(st.cursor_line_col(), (1, 0));
+        st.move_line_end();
+        assert_eq!(st.cursor_line_col(), (1, 3));
+    }
+
+    #[test]
+    fn shift_home_extends_to_line_start() {
+        let mut st = state_from("abcdef");
+        for _ in 0..4 {
+            st.move_right();
+        }
+        st.move_line_start_extending();
+        assert_eq!(st.selection.anchor, 4);
+        assert_eq!(st.selection.head, 0);
     }
 
     #[test]
