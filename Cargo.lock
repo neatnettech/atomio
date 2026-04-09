@@ -428,6 +428,7 @@ version = "0.0.0"
 dependencies = [
  "editor_core",
  "gpui",
+ "language",
  "rfd",
 ]
 
