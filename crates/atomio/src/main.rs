@@ -17,6 +17,7 @@ use gpui::{
     FocusHandle, Focusable, KeyBinding, KeyDownEvent, Render, SharedString, Window, WindowBounds,
     WindowOptions,
 };
+use language::{highlight_rust, HighlightKind, Span};
 
 actions!(
     atomio,
@@ -52,6 +53,80 @@ struct LineView {
     caret: Option<usize>,
     /// `(start_col, end_col)` character range selected on this line, if any.
     selection: Option<(usize, usize)>,
+    /// Syntax highlight runs on this line, in char-column space. Sorted and
+    /// non-overlapping. Empty when the file has no recognised language.
+    highlights: Vec<(usize, usize, HighlightKind)>,
+}
+
+/// Map a [`HighlightKind`] to an RGB foreground colour. This is where the
+/// "theme" lives for now — a single built-in palette loosely modelled on
+/// Catppuccin Mocha, matching the rest of the window chrome.
+fn highlight_color(kind: HighlightKind) -> u32 {
+    match kind {
+        HighlightKind::Keyword => 0xcba6f7,   // mauve
+        HighlightKind::String => 0xa6e3a1,    // green
+        HighlightKind::Number => 0xfab387,    // peach
+        HighlightKind::Comment => 0x6c7086,   // overlay0
+        HighlightKind::Type => 0xf9e2af,      // yellow
+        HighlightKind::Function => 0x89b4fa,  // blue
+        HighlightKind::Attribute => 0xf38ba8, // red
+    }
+}
+
+const DEFAULT_FG: u32 = 0xcdd6f4;
+
+/// Split global byte-indexed [`Span`]s into per-line char-indexed runs.
+///
+/// `src` is the full buffer text; `spans` are byte offsets into that text.
+/// The returned vector has one entry per line in `src`, each containing the
+/// `(char_start, char_end, kind)` runs that fall on that line (multi-line
+/// spans are clipped to each line they touch).
+fn spans_to_line_runs(src: &str, spans: &[Span]) -> Vec<Vec<(usize, usize, HighlightKind)>> {
+    // Byte offsets of each line start. Always at least one entry (line 0).
+    let mut line_starts: Vec<usize> = vec![0];
+    for (i, b) in src.bytes().enumerate() {
+        if b == b'\n' {
+            line_starts.push(i + 1);
+        }
+    }
+    let line_count = line_starts.len();
+    let mut out: Vec<Vec<(usize, usize, HighlightKind)>> = vec![Vec::new(); line_count];
+
+    for span in spans {
+        // Find the starting line via binary search.
+        let start_line = match line_starts.binary_search(&span.start) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        };
+        let mut line = start_line;
+        while line < line_count {
+            let line_start = line_starts[line];
+            // Line end excludes the trailing newline byte so we don't try
+            // to highlight it.
+            let line_end_byte = if line + 1 < line_count {
+                line_starts[line + 1] - 1
+            } else {
+                src.len()
+            };
+            if span.start >= line_end_byte && line + 1 < line_count {
+                line += 1;
+                continue;
+            }
+            let lo = span.start.max(line_start);
+            let hi = span.end.min(line_end_byte);
+            if lo < hi {
+                let line_text = &src[line_start..line_end_byte];
+                let char_start = line_text[..lo - line_start].chars().count();
+                let char_end = line_text[..hi - line_start].chars().count();
+                out[line].push((char_start, char_end, span.kind));
+            }
+            if span.end <= line_end_byte {
+                break;
+            }
+            line += 1;
+        }
+    }
+    out
 }
 
 struct AtomioWindow {
@@ -95,6 +170,24 @@ impl AtomioWindow {
         let sel = &self.state.selection;
         let sel_range = sel.range();
         let sel_active = !sel.is_caret();
+
+        // Run the syntax highlighter once per render when the buffer looks
+        // like Rust. We feed it the full text because tree-sitter wants a
+        // contiguous slice and our buffers are small in v0.0. Incremental
+        // reparse is a v0.2 concern.
+        let is_rust = buffer
+            .path()
+            .and_then(|p| p.extension().and_then(|e| e.to_str()))
+            .map(|ext| ext.eq_ignore_ascii_case("rs"))
+            .unwrap_or(false);
+        let line_runs: Vec<Vec<(usize, usize, HighlightKind)>> = if is_rust {
+            let src = buffer.slice_to_string(0..buffer.len_chars());
+            let spans = highlight_rust(&src);
+            spans_to_line_runs(&src, &spans)
+        } else {
+            Vec::new()
+        };
+
         (0..line_count)
             .map(|i| {
                 let text = buffer.line_text(i);
@@ -112,11 +205,13 @@ impl AtomioWindow {
                 } else {
                     None
                 };
+                let highlights = line_runs.get(i).cloned().unwrap_or_default();
                 LineView {
                     number: i + 1,
                     text,
                     caret,
                     selection,
+                    highlights,
                 }
             })
             .collect()
@@ -397,6 +492,7 @@ impl Render for AtomioWindow {
                             text,
                             caret,
                             selection,
+                            highlights,
                         } = lv;
                         let gutter = div()
                             .w(gutter_width)
@@ -406,61 +502,27 @@ impl Render for AtomioWindow {
                             .text_color(rgb(0x6c7086))
                             .child(format!("{number}"));
 
-                        // Split the line into up to three segments based on
-                        // the selection range, then overlay the caret by
-                        // splitting again at the caret column. We render the
-                        // selected segment with a tinted background.
+                        let runs = build_runs(&text, caret, selection, &highlights);
                         let mut row = div().flex().flex_row();
-                        let (sel_start, sel_end) = selection.unwrap_or((0, 0));
-                        let has_sel = selection.is_some();
-                        let caret_col = caret;
-
-                        // Build segments: (text, is_selected).
-                        let segments: Vec<(String, bool)> = if has_sel {
-                            let (a, rest) = split_at_char(&text, sel_start);
-                            let (b, c) = split_at_char(&rest, sel_end - sel_start);
-                            vec![(a, false), (b, true), (c, false)]
-                        } else {
-                            vec![(text.clone(), false)]
-                        };
-
-                        // Emit each segment, inserting the caret line where
-                        // it falls. Caret col is absolute within the line.
-                        let mut consumed = 0usize;
-                        for (seg_text, selected) in segments {
-                            let seg_len = seg_text.chars().count();
-                            let seg_start = consumed;
-                            let seg_end = consumed + seg_len;
-                            consumed = seg_end;
-
-                            let caret_here = caret_col
-                                .filter(|c| *c >= seg_start && *c <= seg_end)
-                                .map(|c| c - seg_start);
-
-                            let bg = if selected {
-                                rgb(0x45475a)
-                            } else {
-                                rgb(0x1e1e2e)
-                            };
-
-                            match caret_here {
-                                Some(cc) => {
-                                    let (before, after) = split_at_char(&seg_text, cc);
-                                    row = row
-                                        .child(div().bg(bg).child(before))
-                                        .child(div().w(px(2.0)).h(px(18.0)).bg(rgb(0xf5e0dc)))
-                                        .child(div().bg(bg).child(after));
+                        for run in runs {
+                            match run {
+                                Run::Caret => {
+                                    row = row.child(div().w(px(2.0)).h(px(18.0)).bg(rgb(0xf5e0dc)));
                                 }
-                                None => {
-                                    if !seg_text.is_empty() {
-                                        row = row.child(div().bg(bg).child(seg_text));
+                                Run::Text { text, fg, selected } => {
+                                    if text.is_empty() {
+                                        continue;
                                     }
+                                    let bg = if selected { 0x45475a } else { 0x1e1e2e };
+                                    row = row
+                                        .child(div().bg(rgb(bg)).text_color(rgb(fg)).child(text));
                                 }
                             }
                         }
 
-                        // Empty line with no caret still needs height.
-                        if consumed == 0 && caret_col.is_none() {
+                        // Empty line still needs height — emit a blank space
+                        // so the row doesn't collapse.
+                        if text.is_empty() && caret.is_none() {
                             row = row.child(div().child(" "));
                         }
 
@@ -483,16 +545,78 @@ impl Render for AtomioWindow {
     }
 }
 
-/// Split a string at a character (not byte) index and return the two halves
-/// as owned `String`s. Column math in `editor_core` is char-based, so the
-/// UI has to be too.
-fn split_at_char(s: &str, char_idx: usize) -> (String, String) {
-    let split_byte = s
-        .char_indices()
-        .nth(char_idx)
-        .map(|(b, _)| b)
-        .unwrap_or(s.len());
-    (s[..split_byte].to_string(), s[split_byte..].to_string())
+/// A rendered sub-segment of a single line. `build_runs` emits these in
+/// order; the renderer converts each into a gpui `div`.
+#[derive(Debug, PartialEq, Eq)]
+enum Run {
+    Text {
+        text: String,
+        fg: u32,
+        selected: bool,
+    },
+    Caret,
+}
+
+/// Flatten a line into a list of [`Run`]s by merging the three independent
+/// per-character attributes that can apply: foreground colour (from syntax
+/// highlights), selection background, and the caret overlay. We do this by
+/// computing a style tag per character and then collapsing runs of identical
+/// tags, which is straightforward to unit-test without a GPU.
+fn build_runs(
+    text: &str,
+    caret: Option<usize>,
+    selection: Option<(usize, usize)>,
+    highlights: &[(usize, usize, HighlightKind)],
+) -> Vec<Run> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+
+    // Per-character foreground colour.
+    let mut fg: Vec<u32> = vec![DEFAULT_FG; n];
+    for (start, end, kind) in highlights {
+        let s = (*start).min(n);
+        let e = (*end).min(n);
+        let color = highlight_color(*kind);
+        for slot in &mut fg[s..e] {
+            *slot = color;
+        }
+    }
+
+    // Per-character selection flag.
+    let mut sel: Vec<bool> = vec![false; n];
+    if let Some((s, e)) = selection {
+        let s = s.min(n);
+        let e = e.min(n);
+        for slot in &mut sel[s..e] {
+            *slot = true;
+        }
+    }
+
+    let mut runs: Vec<Run> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        // If the caret sits at this column, emit it before the glyph.
+        if caret == Some(i) {
+            runs.push(Run::Caret);
+        }
+        let start = i;
+        let start_fg = fg[i];
+        let start_sel = sel[i];
+        i += 1;
+        while i < n && fg[i] == start_fg && sel[i] == start_sel && caret != Some(i) {
+            i += 1;
+        }
+        runs.push(Run::Text {
+            text: chars[start..i].iter().collect(),
+            fg: start_fg,
+            selected: start_sel,
+        });
+    }
+    // Caret at end-of-line.
+    if caret == Some(n) {
+        runs.push(Run::Caret);
+    }
+    runs
 }
 
 fn load_initial_buffer() -> Buffer {
@@ -570,28 +694,87 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::split_at_char;
+    use super::*;
 
-    #[test]
-    fn split_at_char_ascii() {
-        let (a, b) = split_at_char("hello", 2);
-        assert_eq!(a, "he");
-        assert_eq!(b, "llo");
+    fn text_run(text: &str, fg: u32, selected: bool) -> Run {
+        Run::Text {
+            text: text.to_string(),
+            fg,
+            selected,
+        }
     }
 
     #[test]
-    fn split_at_char_past_end_is_clamped() {
-        let (a, b) = split_at_char("hi", 99);
-        assert_eq!(a, "hi");
-        assert_eq!(b, "");
+    fn runs_plain_text_single_segment() {
+        let runs = build_runs("hello", None, None, &[]);
+        assert_eq!(runs, vec![text_run("hello", DEFAULT_FG, false)]);
     }
 
     #[test]
-    fn split_at_char_multibyte() {
-        // "é" is two bytes, one char — splitting at char index 1 must
-        // return bytes for one codepoint, not one byte.
-        let (a, b) = split_at_char("é!", 1);
-        assert_eq!(a, "é");
-        assert_eq!(b, "!");
+    fn runs_caret_at_middle_splits() {
+        let runs = build_runs("hello", Some(2), None, &[]);
+        assert_eq!(
+            runs,
+            vec![
+                text_run("he", DEFAULT_FG, false),
+                Run::Caret,
+                text_run("llo", DEFAULT_FG, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn runs_caret_at_end_of_line() {
+        let runs = build_runs("hi", Some(2), None, &[]);
+        assert_eq!(runs, vec![text_run("hi", DEFAULT_FG, false), Run::Caret]);
+    }
+
+    #[test]
+    fn runs_highlight_colors_keyword() {
+        let hl = vec![(0, 2, HighlightKind::Keyword)];
+        let runs = build_runs("fn main", None, None, &hl);
+        let kw = highlight_color(HighlightKind::Keyword);
+        assert_eq!(
+            runs,
+            vec![
+                text_run("fn", kw, false),
+                text_run(" main", DEFAULT_FG, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn runs_selection_and_highlight_combine() {
+        // "fn" is a keyword, and chars 1..4 are selected. The overlap
+        // means column 1 (n) should be both selected AND keyword-coloured.
+        let hl = vec![(0, 2, HighlightKind::Keyword)];
+        let runs = build_runs("fn ab", None, Some((1, 4)), &hl);
+        let kw = highlight_color(HighlightKind::Keyword);
+        assert_eq!(
+            runs,
+            vec![
+                text_run("f", kw, false),
+                text_run("n", kw, true),
+                text_run(" a", DEFAULT_FG, true),
+                text_run("b", DEFAULT_FG, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn spans_to_line_runs_clips_multiline_span() {
+        // A block comment that straddles two lines. Byte offsets in src:
+        //   line 0: "/* hi\n"  (bytes 0..5, newline at 5)
+        //   line 1: "more */"  (bytes 6..13)
+        let src = "/* hi\nmore */";
+        let span = Span {
+            start: 0,
+            end: 13,
+            kind: HighlightKind::Comment,
+        };
+        let runs = spans_to_line_runs(src, &[span]);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0], vec![(0, 5, HighlightKind::Comment)]);
+        assert_eq!(runs[1], vec![(0, 7, HighlightKind::Comment)]);
     }
 }
