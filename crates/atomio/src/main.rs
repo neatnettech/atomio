@@ -13,8 +13,9 @@ use std::path::PathBuf;
 
 use editor_core::{Buffer, EditorState};
 use gpui::{
-    actions, div, prelude::*, px, rgb, size, Application, Bounds, Context, FocusHandle, Focusable,
-    KeyBinding, KeyDownEvent, Render, SharedString, Window, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, rgb, size, Application, Bounds, ClipboardItem, Context,
+    FocusHandle, Focusable, KeyBinding, KeyDownEvent, Render, SharedString, Window, WindowBounds,
+    WindowOptions,
 };
 
 actions!(
@@ -35,6 +36,9 @@ actions!(
         MoveLineStartExtending,
         MoveLineEndExtending,
         SelectAll,
+        Copy,
+        Cut,
+        Paste,
         Backspace,
         DeleteForward,
         Undo,
@@ -254,6 +258,27 @@ impl AtomioWindow {
         self.state.select_all();
         cx.notify();
     }
+    fn on_copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.state.selected_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+    fn on_cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.state.cut_selection() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            cx.notify();
+        }
+    }
+    fn on_paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(item) = cx.read_from_clipboard() {
+            if let Some(text) = item.text() {
+                if !text.is_empty() {
+                    self.state.insert_str(&text);
+                    cx.notify();
+                }
+            }
+        }
+    }
     fn on_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
         self.state.backspace();
         cx.notify();
@@ -334,6 +359,9 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_move_line_start_ext))
             .on_action(cx.listener(Self::on_move_line_end_ext))
             .on_action(cx.listener(Self::on_select_all))
+            .on_action(cx.listener(Self::on_copy))
+            .on_action(cx.listener(Self::on_cut))
+            .on_action(cx.listener(Self::on_paste))
             .on_action(cx.listener(Self::on_backspace))
             .on_action(cx.listener(Self::on_delete_forward))
             .on_action(cx.listener(Self::on_undo))
@@ -503,6 +531,9 @@ fn main() {
             KeyBinding::new("cmd-shift-left", MoveLineStartExtending, Some("atomio")),
             KeyBinding::new("cmd-shift-right", MoveLineEndExtending, Some("atomio")),
             KeyBinding::new("cmd-a", SelectAll, Some("atomio")),
+            KeyBinding::new("cmd-c", Copy, Some("atomio")),
+            KeyBinding::new("cmd-x", Cut, Some("atomio")),
+            KeyBinding::new("cmd-v", Paste, Some("atomio")),
             KeyBinding::new("backspace", Backspace, Some("atomio")),
             KeyBinding::new("delete", DeleteForward, Some("atomio")),
             KeyBinding::new("cmd-z", Undo, Some("atomio")),

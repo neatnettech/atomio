@@ -139,6 +139,24 @@ impl EditorState {
         self.redo.clear();
     }
 
+    /// Return the currently selected text, or `None` if the selection is a
+    /// caret. Used by the UI layer for copy / cut.
+    pub fn selected_text(&self) -> Option<String> {
+        if self.selection.is_caret() {
+            None
+        } else {
+            Some(self.buffer.slice_to_string(self.selection.range()))
+        }
+    }
+
+    /// Remove the active selection and return its text. Returns `None` when
+    /// the selection is a caret (nothing to cut).
+    pub fn cut_selection(&mut self) -> Option<String> {
+        let text = self.selected_text()?;
+        self.delete_selection();
+        Some(text)
+    }
+
     fn delete_selection(&mut self) {
         if self.selection.is_caret() {
             return;
@@ -439,6 +457,29 @@ mod tests {
         st.move_line_start_extending();
         assert_eq!(st.selection.anchor, 4);
         assert_eq!(st.selection.head, 0);
+    }
+
+    #[test]
+    fn selected_text_and_cut() {
+        let mut st = state_from("hello world");
+        assert_eq!(st.selected_text(), None);
+        for _ in 0..5 {
+            st.move_right_extending();
+        }
+        assert_eq!(st.selected_text().as_deref(), Some("hello"));
+        let cut = st.cut_selection();
+        assert_eq!(cut.as_deref(), Some("hello"));
+        assert_eq!(
+            st.buffer.slice_to_string(0..st.buffer.len_chars()),
+            " world"
+        );
+        assert!(st.selection.is_caret());
+        assert_eq!(st.selection.head, 0);
+        st.undo();
+        assert_eq!(
+            st.buffer.slice_to_string(0..st.buffer.len_chars()),
+            "hello world"
+        );
     }
 
     #[test]
