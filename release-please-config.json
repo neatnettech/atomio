@@ -14,6 +14,11 @@
       "package-name": "editor_core",
       "skip-github-release": true,
       "changelog-path": "../../CHANGELOG.md"
+    },
+    "crates/language": {
+      "package-name": "language",
+      "skip-github-release": true,
+      "changelog-path": "../../CHANGELOG.md"
     }
   }
 }
