@@ -609,22 +609,27 @@ impl Render for AtomioWindow {
         let status = self.status.clone();
         let title = self.title();
 
-        // Build palette overlay if visible.
+        // Build palette overlay if visible. Rendered as a Spotlight-style
+        // floating panel: absolutely positioned, horizontally centred,
+        // anchored near the top of the window so it doesn't shift the
+        // editor content underneath.
         let palette_overlay: Option<gpui::Div> = self.palette_query.as_ref().map(|query| {
             let matches = self.commands.search(query);
             let selected = self.palette_selected;
-            let mut palette = div()
+            let mut inner = div()
                 .flex()
                 .flex_col()
-                .mx_auto()
-                .w(px(400.0))
+                .w(px(440.0))
                 .bg(rgb(0x313244))
-                .rounded(px(6.0))
+                .rounded(px(8.0))
                 .py_1()
+                .shadow_lg()
+                .border_1()
+                .border_color(rgb(0x45475a))
                 .child(
                     div()
-                        .px_2()
-                        .py_1()
+                        .px_3()
+                        .py_2()
                         .text_sm()
                         .text_color(rgb(0xcdd6f4))
                         .child(if query.is_empty() {
@@ -633,19 +638,35 @@ impl Render for AtomioWindow {
                             format!("> {query}")
                         }),
                 );
+            if !matches.is_empty() {
+                inner = inner.child(div().h(px(1.0)).mx_2().bg(rgb(0x45475a)));
+            }
             for (i, m) in matches.iter().take(10).enumerate() {
                 let bg = if i == selected { 0x45475a } else { 0x313244 };
-                palette = palette.child(
+                inner = inner.child(
                     div()
-                        .px_2()
+                        .px_3()
                         .py_1()
                         .text_sm()
                         .text_color(rgb(0xcdd6f4))
                         .bg(rgb(bg))
+                        .rounded(px(4.0))
+                        .mx_1()
                         .child(m.command.label.clone()),
                 );
             }
-            palette
+            // Outer container: takes the full window area, absolutely
+            // positioned at top-left, centres the inner panel horizontally
+            // and pushes it down from the top with padding.
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .justify_center()
+                .pt(px(80.0))
+                .child(inner)
         });
 
         div()
@@ -693,8 +714,6 @@ impl Render for AtomioWindow {
                     .child(div().text_sm().text_color(rgb(0xf5e0dc)).child(title))
                     .child(div().text_xs().text_color(rgb(0x9399b2)).child(subtitle)),
             )
-            // Command palette overlay (conditionally rendered)
-            .children(palette_overlay)
             // Buffer pane: gutter + text
             .child(
                 div()
@@ -759,6 +778,9 @@ impl Render for AtomioWindow {
                     .child(div().child(status))
                     .child(div().child(cursor)),
             )
+            // Command palette — absolutely positioned, floats above the
+            // editor like macOS Spotlight.
+            .children(palette_overlay)
     }
 }
 
