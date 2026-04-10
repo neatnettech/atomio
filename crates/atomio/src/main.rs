@@ -309,31 +309,82 @@ impl AtomioWindow {
         .detach();
     }
 
+    /// True when the command palette overlay owns keyboard focus.
+    fn palette_is_open(&self) -> bool {
+        self.palette_query.is_some()
+    }
+
+    fn palette_move_up(&mut self, cx: &mut Context<Self>) {
+        self.palette_selected = self.palette_selected.saturating_sub(1);
+        cx.notify();
+    }
+
+    fn palette_move_down(&mut self, cx: &mut Context<Self>) {
+        if let Some(query) = &self.palette_query {
+            let count = self.commands.search(query).len();
+            if self.palette_selected + 1 < count {
+                self.palette_selected += 1;
+            }
+        }
+        cx.notify();
+    }
+
+    fn palette_backspace(&mut self, cx: &mut Context<Self>) {
+        if let Some(query) = &mut self.palette_query {
+            query.pop();
+            self.palette_selected = 0;
+        }
+        cx.notify();
+    }
+
     fn on_move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            return;
+        }
         self.state.move_left();
         cx.notify();
     }
     fn on_move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            return;
+        }
         self.state.move_right();
         cx.notify();
     }
     fn on_move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            self.palette_move_up(cx);
+            return;
+        }
         self.state.move_up();
         cx.notify();
     }
     fn on_move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            self.palette_move_down(cx);
+            return;
+        }
         self.state.move_down();
         cx.notify();
     }
     fn on_move_line_start(&mut self, _: &MoveLineStart, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            return;
+        }
         self.state.move_line_start();
         cx.notify();
     }
     fn on_move_line_end(&mut self, _: &MoveLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            return;
+        }
         self.state.move_line_end();
         cx.notify();
     }
     fn on_move_left_ext(&mut self, _: &MoveLeftExtending, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            return;
+        }
         self.state.move_left_extending();
         cx.notify();
     }
@@ -343,14 +394,23 @@ impl AtomioWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.palette_is_open() {
+            return;
+        }
         self.state.move_right_extending();
         cx.notify();
     }
     fn on_move_up_ext(&mut self, _: &MoveUpExtending, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            return;
+        }
         self.state.move_up_extending();
         cx.notify();
     }
     fn on_move_down_ext(&mut self, _: &MoveDownExtending, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            return;
+        }
         self.state.move_down_extending();
         cx.notify();
     }
@@ -360,6 +420,9 @@ impl AtomioWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.palette_is_open() {
+            return;
+        }
         self.state.move_line_start_extending();
         cx.notify();
     }
@@ -369,25 +432,40 @@ impl AtomioWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.palette_is_open() {
+            return;
+        }
         self.state.move_line_end_extending();
         cx.notify();
     }
     fn on_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            return;
+        }
         self.state.select_all();
         cx.notify();
     }
     fn on_copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            return;
+        }
         if let Some(text) = self.state.selected_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
     fn on_cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            return;
+        }
         if let Some(text) = self.state.cut_selection() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             cx.notify();
         }
     }
     fn on_paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            return;
+        }
         if let Some(item) = cx.read_from_clipboard() {
             if let Some(text) = item.text() {
                 if !text.is_empty() {
@@ -398,18 +476,31 @@ impl AtomioWindow {
         }
     }
     fn on_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            self.palette_backspace(cx);
+            return;
+        }
         self.state.backspace();
         cx.notify();
     }
     fn on_delete_forward(&mut self, _: &DeleteForward, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            return;
+        }
         self.state.delete_forward();
         cx.notify();
     }
     fn on_undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            return;
+        }
         self.state.undo();
         cx.notify();
     }
     fn on_redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_is_open() {
+            return;
+        }
         self.state.redo();
         cx.notify();
     }
@@ -461,46 +552,25 @@ impl AtomioWindow {
     }
 
     /// Catch-all: any key_down the action system did not consume.
+    ///
+    /// When the palette is open, printable chars feed the query. When it's
+    /// closed, printable chars insert into the buffer. Up/down/backspace
+    /// are handled by the action handlers (MoveUp, MoveDown, Backspace)
+    /// which check `palette_is_open()` and reroute accordingly.
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         let m = &keystroke.modifiers;
 
-        // When the palette is open, intercept keystrokes for its input.
+        // When the palette is open, only accept printable chars for the query.
         if let Some(query) = &mut self.palette_query {
-            if m.control || m.alt || m.function {
+            if m.control || m.alt || m.function || m.platform {
                 return;
             }
-            // platform (cmd) shortcuts still go through (cmd+shift+p to
-            // re-toggle, etc.) but printable chars feed the query.
-            if m.platform {
-                return;
-            }
-            let key = keystroke.key.as_str();
-            match key {
-                "backspace" => {
-                    query.pop();
+            if let Some(text) = keystroke.key_char.as_deref() {
+                if !text.is_empty() {
+                    query.push_str(text);
                     self.palette_selected = 0;
                     cx.notify();
-                }
-                "up" => {
-                    self.palette_selected = self.palette_selected.saturating_sub(1);
-                    cx.notify();
-                }
-                "down" => {
-                    let count = self.commands.search(query).len();
-                    if self.palette_selected + 1 < count {
-                        self.palette_selected += 1;
-                    }
-                    cx.notify();
-                }
-                _ => {
-                    if let Some(text) = keystroke.key_char.as_deref() {
-                        if !text.is_empty() {
-                            query.push_str(text);
-                            self.palette_selected = 0;
-                            cx.notify();
-                        }
-                    }
                 }
             }
             return;
