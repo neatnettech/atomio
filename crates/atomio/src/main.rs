@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use editor_core::{Buffer, EditorState};
+use editor_core::{Buffer, CommandRegistry, EditorState};
 use gpui::{
     actions, div, prelude::*, px, rgb, size, Application, Bounds, ClipboardItem, Context,
     FocusHandle, Focusable, KeyBinding, KeyDownEvent, Render, SharedString, Window, WindowBounds,
@@ -44,6 +44,9 @@ actions!(
         DeleteForward,
         Undo,
         Redo,
+        TogglePalette,
+        ConfirmPalette,
+        DismissPalette,
     ]
 );
 
@@ -131,8 +134,28 @@ fn spans_to_line_runs(src: &str, spans: &[Span]) -> Vec<Vec<(usize, usize, Highl
 
 struct AtomioWindow {
     state: EditorState,
+    commands: CommandRegistry,
     status: SharedString,
     focus_handle: FocusHandle,
+    /// When `Some`, the command palette overlay is visible and this holds
+    /// the current query string.
+    palette_query: Option<String>,
+    /// Index of the currently highlighted item in the filtered results.
+    palette_selected: usize,
+}
+
+fn build_command_registry() -> CommandRegistry {
+    let mut reg = CommandRegistry::new();
+    reg.register("File: Open", "open_file");
+    reg.register("File: Save", "save_file");
+    reg.register("Edit: Undo", "undo");
+    reg.register("Edit: Redo", "redo");
+    reg.register("Edit: Copy", "copy");
+    reg.register("Edit: Cut", "cut");
+    reg.register("Edit: Paste", "paste");
+    reg.register("Edit: Select All", "select_all");
+    reg.register("View: Toggle Command Palette", "toggle_palette");
+    reg
 }
 
 impl AtomioWindow {
@@ -390,24 +413,106 @@ impl AtomioWindow {
         self.state.redo();
         cx.notify();
     }
+    fn on_toggle_palette(&mut self, _: &TogglePalette, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_query.is_some() {
+            self.palette_query = None;
+        } else {
+            self.palette_query = Some(String::new());
+            self.palette_selected = 0;
+        }
+        cx.notify();
+    }
+    fn on_dismiss_palette(&mut self, _: &DismissPalette, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_query.is_some() {
+            self.palette_query = None;
+            cx.notify();
+        }
+    }
+    fn on_confirm_palette(
+        &mut self,
+        _: &ConfirmPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(query) = self.palette_query.take() else {
+            return;
+        };
+        let matches = self.commands.search(&query);
+        if let Some(m) = matches.get(self.palette_selected) {
+            self.dispatch_command(&m.command.id, window, cx);
+        }
+        self.palette_selected = 0;
+        cx.notify();
+    }
 
-    /// Catch-all: any key_down the action system did not consume. We use
-    /// this exclusively for printable characters — the non-printable keys
-    /// (arrows, backspace, cmd+*) are bound as actions and short-circuit
-    /// before we get here.
+    fn dispatch_command(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match id {
+            "open_file" => self.on_open(&OpenFile, window, cx),
+            "save_file" => self.on_save(&SaveFile, window, cx),
+            "undo" => self.on_undo(&Undo, window, cx),
+            "redo" => self.on_redo(&Redo, window, cx),
+            "copy" => self.on_copy(&Copy, window, cx),
+            "cut" => self.on_cut(&Cut, window, cx),
+            "paste" => self.on_paste(&Paste, window, cx),
+            "select_all" => self.on_select_all(&SelectAll, window, cx),
+            "toggle_palette" => self.on_toggle_palette(&TogglePalette, window, cx),
+            _ => {}
+        }
+    }
+
+    /// Catch-all: any key_down the action system did not consume.
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
-        // Ignore anything with a modifier other than shift — those are either
-        // already-bound actions (cmd+*) or shortcuts we don't own yet.
         let m = &keystroke.modifiers;
+
+        // When the palette is open, intercept keystrokes for its input.
+        if let Some(query) = &mut self.palette_query {
+            if m.control || m.alt || m.function {
+                return;
+            }
+            // platform (cmd) shortcuts still go through (cmd+shift+p to
+            // re-toggle, etc.) but printable chars feed the query.
+            if m.platform {
+                return;
+            }
+            let key = keystroke.key.as_str();
+            match key {
+                "backspace" => {
+                    query.pop();
+                    self.palette_selected = 0;
+                    cx.notify();
+                }
+                "up" => {
+                    self.palette_selected = self.palette_selected.saturating_sub(1);
+                    cx.notify();
+                }
+                "down" => {
+                    let count = self.commands.search(query).len();
+                    if self.palette_selected + 1 < count {
+                        self.palette_selected += 1;
+                    }
+                    cx.notify();
+                }
+                _ => {
+                    if let Some(text) = keystroke.key_char.as_deref() {
+                        if !text.is_empty() {
+                            query.push_str(text);
+                            self.palette_selected = 0;
+                            cx.notify();
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        // Normal mode: feed printable chars to the buffer.
         if m.control || m.alt || m.platform || m.function {
             return;
         }
         let Some(text) = keystroke.key_char.as_deref() else {
             return;
         };
-        // Tab / enter arrive as key_char; printable ASCII too. Filter out
-        // pure-control bytes so a stray escape doesn't sneak in.
         if text.is_empty() {
             return;
         }
@@ -426,8 +531,6 @@ impl Render for AtomioWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let line_views = self.buffer_line_views();
         let gutter_width = {
-            // One extra char of padding so a 3-digit line number doesn't
-            // touch the separator.
             let digits = line_views.len().max(1).to_string().len();
             px(((digits + 1) * 10) as f32)
         };
@@ -435,6 +538,45 @@ impl Render for AtomioWindow {
         let cursor = self.cursor_label();
         let status = self.status.clone();
         let title = self.title();
+
+        // Build palette overlay if visible.
+        let palette_overlay: Option<gpui::Div> = self.palette_query.as_ref().map(|query| {
+            let matches = self.commands.search(query);
+            let selected = self.palette_selected;
+            let mut palette = div()
+                .flex()
+                .flex_col()
+                .mx_auto()
+                .w(px(400.0))
+                .bg(rgb(0x313244))
+                .rounded(px(6.0))
+                .py_1()
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_sm()
+                        .text_color(rgb(0xcdd6f4))
+                        .child(if query.is_empty() {
+                            "> type to search...".to_string()
+                        } else {
+                            format!("> {query}")
+                        }),
+                );
+            for (i, m) in matches.iter().take(10).enumerate() {
+                let bg = if i == selected { 0x45475a } else { 0x313244 };
+                palette = palette.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_sm()
+                        .text_color(rgb(0xcdd6f4))
+                        .bg(rgb(bg))
+                        .child(m.command.label.clone()),
+                );
+            }
+            palette
+        });
 
         div()
             .key_context("atomio")
@@ -461,6 +603,9 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_delete_forward))
             .on_action(cx.listener(Self::on_undo))
             .on_action(cx.listener(Self::on_redo))
+            .on_action(cx.listener(Self::on_toggle_palette))
+            .on_action(cx.listener(Self::on_confirm_palette))
+            .on_action(cx.listener(Self::on_dismiss_palette))
             .on_key_down(cx.listener(Self::on_key_down))
             .flex()
             .flex_col()
@@ -478,6 +623,8 @@ impl Render for AtomioWindow {
                     .child(div().text_sm().text_color(rgb(0xf5e0dc)).child(title))
                     .child(div().text_xs().text_color(rgb(0x9399b2)).child(subtitle)),
             )
+            // Command palette overlay (conditionally rendered)
+            .children(palette_overlay)
             // Buffer pane: gutter + text
             .child(
                 div()
@@ -662,6 +809,9 @@ fn main() {
             KeyBinding::new("delete", DeleteForward, Some("atomio")),
             KeyBinding::new("cmd-z", Undo, Some("atomio")),
             KeyBinding::new("cmd-shift-z", Redo, Some("atomio")),
+            KeyBinding::new("cmd-shift-p", TogglePalette, Some("atomio")),
+            KeyBinding::new("enter", ConfirmPalette, Some("atomio")),
+            KeyBinding::new("escape", DismissPalette, Some("atomio")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(720.0), px(480.0)), cx);
@@ -673,10 +823,15 @@ fn main() {
                 },
                 |_window, cx| {
                     let state = EditorState::new(buffer.clone());
+                    let commands = build_command_registry();
                     cx.new(|cx| AtomioWindow {
                         state,
-                        status: "type to edit · cmd+o open · cmd+s save · cmd+z undo".into(),
+                        commands,
+                        status: "type to edit · cmd+o open · cmd+s save · cmd+shift+p palette"
+                            .into(),
                         focus_handle: cx.focus_handle(),
+                        palette_query: None,
+                        palette_selected: 0,
                     })
                 },
             )
