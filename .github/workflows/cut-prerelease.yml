@@ -36,8 +36,6 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: install Metal Toolchain
-        run: xcodebuild -downloadComponent MetalToolchain
       - name: build release binary
         run: cargo build --release --workspace --locked
 
@@ -47,10 +45,9 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
-          # Read version scoped to [workspace.package] in the root
-          # Cargo.toml. release-please updates this value on stable
-          # releases; member crates inherit it via
-          # version.workspace = true.
+          # Read version from [workspace.package] in the root Cargo.toml.
+          # Note: member crates use explicit versions for release-please
+          # compatibility, not version.workspace = true.
           VERSION=$(awk -F'"' '
             /^\[workspace\.package\]/ { in_section = 1; next }
             /^\[/ { in_section = 0 }
