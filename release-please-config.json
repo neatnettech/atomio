@@ -19,6 +19,11 @@
       "package-name": "language",
       "skip-github-release": true,
       "changelog-path": "../../CHANGELOG.md"
+    },
+    "crates/debugger": {
+      "package-name": "debugger",
+      "skip-github-release": true,
+      "changelog-path": "../../CHANGELOG.md"
     }
   }
 }
