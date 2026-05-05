@@ -17,7 +17,7 @@ use gpui::{
     FocusHandle, Focusable, KeyBinding, KeyDownEvent, Render, SharedString, Window, WindowBounds,
     WindowOptions,
 };
-use language::{highlight_rust, HighlightKind, Span};
+use language::{highlight, HighlightKind, Language, Span};
 
 actions!(
     atomio,
@@ -73,6 +73,8 @@ fn highlight_color(kind: HighlightKind) -> u32 {
         HighlightKind::Type => 0xf9e2af,      // yellow
         HighlightKind::Function => 0x89b4fa,  // blue
         HighlightKind::Attribute => 0xf38ba8, // red
+        HighlightKind::Property => 0xf5c2e7,  // pink
+        HighlightKind::Constant => 0xfab387,  // peach (same as number)
     }
 }
 
@@ -194,18 +196,14 @@ impl AtomioWindow {
         let sel_range = sel.range();
         let sel_active = !sel.is_caret();
 
-        // Run the syntax highlighter once per render when the buffer looks
-        // like Rust. We feed it the full text because tree-sitter wants a
-        // contiguous slice and our buffers are small in v0.0. Incremental
-        // reparse is a v0.2 concern.
-        let is_rust = buffer
-            .path()
-            .and_then(|p| p.extension().and_then(|e| e.to_str()))
-            .map(|ext| ext.eq_ignore_ascii_case("rs"))
-            .unwrap_or(false);
-        let line_runs: Vec<Vec<(usize, usize, HighlightKind)>> = if is_rust {
+        // Run the syntax highlighter once per render when we recognise
+        // the file's language by extension. Full-text reparse per render
+        // is fine for small buffers; incremental reparse is a future
+        // optimisation tracked for v0.2.
+        let lang = buffer.path().and_then(Language::from_path);
+        let line_runs: Vec<Vec<(usize, usize, HighlightKind)>> = if let Some(lang) = lang {
             let src = buffer.slice_to_string(0..buffer.len_chars());
-            let spans = highlight_rust(&src);
+            let spans = highlight(&src, lang);
             spans_to_line_runs(&src, &spans)
         } else {
             Vec::new()
