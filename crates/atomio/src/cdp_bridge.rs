@@ -14,7 +14,8 @@ use std::thread;
 
 use console::{entry_from_console_api_called, LogLevel, SourceLocation};
 use debugger::cdp::{debugger_enable, runtime_enable, CdpMessage};
-use debugger::metro::scan_localhost;
+use debugger::metro::{fetch_source, scan_localhost};
+use debugger::scripts::Script;
 use debugger::transport::CdpTransport;
 
 /// Commands the UI sends to the worker thread.
@@ -24,6 +25,10 @@ pub enum DebuggerCommand {
     Connect,
     /// Tear down the active connection (best effort).
     Disconnect,
+    /// Fetch a source resource by URL and emit it back as
+    /// [`DebuggerEvent::SourceFetched`]. Used to load script bodies and
+    /// `.map` files referenced by `Debugger.scriptParsed`.
+    FetchSource { url: String },
 }
 
 /// Events the worker thread pushes back to the UI.
@@ -36,6 +41,13 @@ pub enum DebuggerEvent {
         level: LogLevel,
         message: String,
         location: Option<SourceLocation>,
+    },
+    /// A `Debugger.scriptParsed` event was parsed into a [`Script`].
+    ScriptParsed(Script),
+    /// Result of a [`DebuggerCommand::FetchSource`] request.
+    SourceFetched {
+        url: String,
+        body: Result<String, String>,
     },
 }
 
@@ -106,6 +118,13 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                 current = None;
                 let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Disconnected));
             }
+            DebuggerCommand::FetchSource { url } => {
+                let evt_tx = evt_tx.clone();
+                tokio::spawn(async move {
+                    let body = fetch_source(&url).await;
+                    let _ = evt_tx.send(DebuggerEvent::SourceFetched { url, body });
+                });
+            }
             DebuggerCommand::Connect => {
                 let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Scanning));
                 let targets = scan_localhost().await;
@@ -140,23 +159,31 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                     ws_url: ws_url.clone(),
                 }));
 
-                // Subscribe and forward log events. We spawn this as a
+                // Subscribe and forward log + script events. Spawned as a
                 // background task so the worker can keep polling commands.
                 let mut events = transport.subscribe();
                 let evt_tx = evt_tx.clone();
                 tokio::spawn(async move {
                     while let Ok(msg) = events.recv().await {
                         if let CdpMessage::Event { method, params } = msg {
-                            if method == "Runtime.consoleAPICalled" {
-                                if let Some((level, message, location)) =
-                                    entry_from_console_api_called(&params)
-                                {
-                                    let _ = evt_tx.send(DebuggerEvent::Log {
-                                        level,
-                                        message,
-                                        location,
-                                    });
+                            match method.as_str() {
+                                "Runtime.consoleAPICalled" => {
+                                    if let Some((level, message, location)) =
+                                        entry_from_console_api_called(&params)
+                                    {
+                                        let _ = evt_tx.send(DebuggerEvent::Log {
+                                            level,
+                                            message,
+                                            location,
+                                        });
+                                    }
                                 }
+                                "Debugger.scriptParsed" => {
+                                    if let Some(script) = Script::from_script_parsed(&params) {
+                                        let _ = evt_tx.send(DebuggerEvent::ScriptParsed(script));
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }

@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use cdp_bridge::{ConnectionState, DebuggerBridge, DebuggerCommand, DebuggerEvent};
 use console::Console;
+use debugger::scripts::ScriptRegistry;
 use editor_core::{Buffer, CommandRegistry, EditorState};
 use gpui::{
     actions, div, prelude::*, px, rgb, size, Application, Bounds, ClipboardItem, Context,
@@ -56,6 +57,7 @@ actions!(
         Disconnect,
         ToggleConsole,
         ClearConsole,
+        OpenFirstScript,
     ]
 );
 
@@ -174,6 +176,8 @@ struct AtomioWindow {
     connection: ConnectionState,
     /// Bridge to the CDP worker thread. `None` until the runtime initialises it.
     bridge: Option<DebuggerBridge>,
+    /// Scripts the runtime has reported via `Debugger.scriptParsed`.
+    scripts: ScriptRegistry,
 }
 
 fn build_command_registry() -> CommandRegistry {
@@ -191,6 +195,7 @@ fn build_command_registry() -> CommandRegistry {
     reg.register("Debug: Connect", "connect");
     reg.register("Debug: Disconnect", "disconnect");
     reg.register("Debug: Clear Console", "clear_console");
+    reg.register("Debug: Open First Script", "open_first_script");
     reg
 }
 
@@ -583,6 +588,7 @@ impl AtomioWindow {
             "connect" => self.on_connect(&Connect, window, cx),
             "disconnect" => self.on_disconnect(&Disconnect, window, cx),
             "clear_console" => self.on_clear_console(&ClearConsole, window, cx),
+            "open_first_script" => self.on_open_first_script(&OpenFirstScript, window, cx),
             _ => {}
         }
     }
@@ -593,6 +599,27 @@ impl AtomioWindow {
     }
     fn on_clear_console(&mut self, _: &ClearConsole, _: &mut Window, cx: &mut Context<Self>) {
         self.console.clear();
+        cx.notify();
+    }
+    fn on_open_first_script(
+        &mut self,
+        _: &OpenFirstScript,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bridge) = &self.bridge else {
+            return;
+        };
+        let Some(script) = self.scripts.iter().next() else {
+            self.status = "no scripts known yet — connect and let runtime load".into();
+            cx.notify();
+            return;
+        };
+        let url = script.url.clone();
+        let _ = bridge
+            .commands
+            .send(DebuggerCommand::FetchSource { url: url.clone() });
+        self.status = format!("fetching {url}...").into();
         cx.notify();
     }
     fn on_connect(&mut self, _: &Connect, _: &mut Window, cx: &mut Context<Self>) {
@@ -640,6 +667,30 @@ impl AtomioWindow {
                     location,
                 } => {
                     self.console.push(level, message, location);
+                    changed = true;
+                }
+                DebuggerEvent::ScriptParsed(script) => {
+                    self.scripts.upsert(script);
+                    changed = true;
+                }
+                DebuggerEvent::SourceFetched { url, body } => {
+                    match body {
+                        Ok(text) => {
+                            // Replace the editor buffer with the fetched
+                            // source and lock it as read-only — Metro
+                            // serves the canonical text the runtime
+                            // executed, mutating it locally would diverge.
+                            let mut buf = Buffer::default();
+                            buf.insert(0, &text);
+                            self.state.replace_buffer(buf);
+                            self.state.set_read_only(true);
+                            self.status =
+                                format!("loaded {url} ({} chars)", text.chars().count()).into();
+                        }
+                        Err(e) => {
+                            self.status = format!("fetch failed: {url}: {e}").into();
+                        }
+                    }
                     changed = true;
                 }
             }
@@ -751,7 +802,11 @@ impl Render for AtomioWindow {
                         .text_xs()
                         .text_color(rgb(0x9399b2))
                         .bg(rgb(0x11111b))
-                        .child(format!("Console — {} entries", self.console.len())),
+                        .child(format!(
+                            "Console — {} entries · {} scripts loaded",
+                            self.console.len(),
+                            self.scripts.len()
+                        )),
                 );
             let mut list = div().flex().flex_col().px_3().py_1().text_xs();
             if entries.is_empty() {
@@ -873,6 +928,7 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_dismiss_palette))
             .on_action(cx.listener(Self::on_toggle_console))
             .on_action(cx.listener(Self::on_clear_console))
+            .on_action(cx.listener(Self::on_open_first_script))
             .on_action(cx.listener(Self::on_connect))
             .on_action(cx.listener(Self::on_disconnect))
             .on_key_down(cx.listener(Self::on_key_down))
@@ -1098,6 +1154,7 @@ fn main() {
             KeyBinding::new("cmd-shift-d", Connect, Some("atomio")),
             KeyBinding::new("cmd-shift-c", ToggleConsole, Some("atomio")),
             KeyBinding::new("cmd-k", ClearConsole, Some("atomio")),
+            KeyBinding::new("cmd-shift-o", OpenFirstScript, Some("atomio")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(720.0), px(480.0)), cx);
@@ -1123,6 +1180,7 @@ fn main() {
                         console_visible: true,
                         connection: ConnectionState::Disconnected,
                         bridge: Some(bridge),
+                        scripts: ScriptRegistry::new(),
                     })
                 },
             )
