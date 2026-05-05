@@ -27,3 +27,9 @@ jobs:
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ github.token }}
+          # RUSTSEC-2026-0097: rand unsound only when a custom logger
+          # calls rand::rng() inside its log() implementation. We don't
+          # ship a custom logger; reachable via transitive tungstenite.
+          # core2 yanked: transitive only, no direct dependency, will
+          # clear when an upstream releases an updated version.
+          ignore: RUSTSEC-2026-0097
