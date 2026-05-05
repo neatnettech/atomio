@@ -15,4 +15,5 @@
 
 pub mod cdp;
 pub mod metro;
+pub mod scripts;
 pub mod transport;

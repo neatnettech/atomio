@@ -75,17 +75,36 @@ pub async fn scan_localhost() -> Vec<(String, DebugTarget)> {
     all
 }
 
-/// Minimal HTTP GET that returns parsed JSON. Uses raw TCP + HTTP/1.1 to
-/// avoid pulling in a heavy HTTP client dependency (reqwest, hyper, etc.).
+/// Fetch a source file (or any text resource) from Metro at `url`. Used
+/// to load script bodies and `.map` files referenced by
+/// `Debugger.scriptParsed`. Returns the response body as `String`.
 ///
-/// This is intentionally bare-bones: no redirects, no TLS, no keep-alive.
-/// It's only used for localhost Metro discovery where simplicity beats
-/// feature coverage.
+/// Wrapped in a 5-second timeout. Errors are coalesced into a single
+/// string for ease of UI display.
+pub async fn fetch_source(url: &str) -> Result<String, String> {
+    tokio::time::timeout(Duration::from_secs(5), http_get(url))
+        .await
+        .map_err(|_| "request timed out".to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// Minimal HTTP GET that returns parsed JSON for the discovery endpoint.
 async fn fetch_json(url: &str) -> Result<Vec<DebugTarget>, FetchError> {
+    let body = http_get(url).await?;
+    serde_json::from_str(&body).map_err(|_| FetchError::Parse)
+}
+
+/// Bare-bones HTTP/1.1 GET over raw TCP. No redirects, no TLS, no
+/// keep-alive. Localhost-only by design; we only talk to Metro on
+/// `http://localhost:<port>`.
+async fn http_get(url: &str) -> Result<String, FetchError> {
     let parsed: url::Url = url.parse().map_err(|_| FetchError::InvalidUrl)?;
     let host = parsed.host_str().ok_or(FetchError::InvalidUrl)?;
     let port = parsed.port().unwrap_or(80);
-    let path = parsed.path();
+    let path_query = match parsed.query() {
+        Some(q) => format!("{}?{q}", parsed.path()),
+        None => parsed.path().to_string(),
+    };
 
     let addr = format!("{host}:{port}");
     let stream = tokio::net::TcpStream::connect(&addr)
@@ -93,7 +112,7 @@ async fn fetch_json(url: &str) -> Result<Vec<DebugTarget>, FetchError> {
         .map_err(|_| FetchError::Connect)?;
 
     let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        "GET {path_query} HTTP/1.1\r\nHost: {host}:{port}\r\nAccept: */*\r\nConnection: close\r\n\r\n"
     );
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -117,7 +136,7 @@ async fn fetch_json(url: &str) -> Result<Vec<DebugTarget>, FetchError> {
         .map(|(_, b)| b)
         .unwrap_or("");
 
-    serde_json::from_str(body).map_err(|_| FetchError::Parse)
+    Ok(body.to_string())
 }
 
 #[derive(Debug)]
@@ -127,6 +146,19 @@ enum FetchError {
     Io,
     Parse,
 }
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::InvalidUrl => write!(f, "invalid URL"),
+            FetchError::Connect => write!(f, "connection failed"),
+            FetchError::Io => write!(f, "I/O error"),
+            FetchError::Parse => write!(f, "parse error"),
+        }
+    }
+}
+
+impl std::error::Error for FetchError {}
 
 #[cfg(test)]
 mod tests {

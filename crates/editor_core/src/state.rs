@@ -63,6 +63,10 @@ pub struct EditorState {
     pub selection: Selection,
     undo: Vec<Edit>,
     redo: Vec<Edit>,
+    /// When true, all mutating ops are no-ops. Used for Metro-served
+    /// source files where edits would diverge from what the runtime
+    /// actually executed.
+    read_only: bool,
 }
 
 impl EditorState {
@@ -72,11 +76,25 @@ impl EditorState {
             selection: Selection::caret(0),
             undo: Vec::new(),
             redo: Vec::new(),
+            read_only: false,
         }
+    }
+
+    /// Whether the buffer rejects mutating operations.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// Set the read-only flag. Toggling does not touch buffer contents
+    /// or history.
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
     }
 
     /// Replace the backing buffer (e.g. after opening a new file). Clears
     /// history because the old edits no longer apply to the new content.
+    /// `read_only` carries through `replace_buffer` (per-buffer flag must
+    /// be set explicitly).
     pub fn replace_buffer(&mut self, buffer: Buffer) {
         self.buffer = buffer;
         self.selection = Selection::caret(0);
@@ -86,7 +104,7 @@ impl EditorState {
 
     /// Insert `text` at the caret, replacing any active selection first.
     pub fn insert_str(&mut self, text: &str) {
-        if text.is_empty() {
+        if self.read_only || text.is_empty() {
             return;
         }
         self.delete_selection();
@@ -103,6 +121,9 @@ impl EditorState {
     /// Delete the character before the caret. If a selection is active,
     /// delete the selection instead.
     pub fn backspace(&mut self) {
+        if self.read_only {
+            return;
+        }
         if !self.selection.is_caret() {
             self.delete_selection();
             return;
@@ -121,6 +142,9 @@ impl EditorState {
 
     /// Delete the character after the caret, or the active selection.
     pub fn delete_forward(&mut self) {
+        if self.read_only {
+            return;
+        }
         if !self.selection.is_caret() {
             self.delete_selection();
             return;
@@ -152,13 +176,16 @@ impl EditorState {
     /// Remove the active selection and return its text. Returns `None` when
     /// the selection is a caret (nothing to cut).
     pub fn cut_selection(&mut self) -> Option<String> {
+        if self.read_only {
+            return None;
+        }
         let text = self.selected_text()?;
         self.delete_selection();
         Some(text)
     }
 
     fn delete_selection(&mut self) {
-        if self.selection.is_caret() {
+        if self.read_only || self.selection.is_caret() {
             return;
         }
         let range = self.selection.range();
@@ -286,12 +313,18 @@ impl EditorState {
     }
 
     pub fn undo(&mut self) {
+        if self.read_only {
+            return;
+        }
         let Some(edit) = self.undo.pop() else { return };
         edit.invert().apply(&mut self.buffer, &mut self.selection);
         self.redo.push(edit);
     }
 
     pub fn redo(&mut self) {
+        if self.read_only {
+            return;
+        }
         let Some(edit) = self.redo.pop() else { return };
         edit.apply(&mut self.buffer, &mut self.selection);
         self.undo.push(edit);
@@ -480,6 +513,58 @@ mod tests {
             st.buffer.slice_to_string(0..st.buffer.len_chars()),
             "hello world"
         );
+    }
+
+    #[test]
+    fn read_only_blocks_mutations() {
+        let mut st = state_from("hello");
+        st.set_read_only(true);
+        st.insert_str(" world");
+        assert_eq!(st.buffer.slice_to_string(0..st.buffer.len_chars()), "hello");
+
+        st.move_right();
+        st.move_right();
+        st.backspace();
+        assert_eq!(st.buffer.slice_to_string(0..st.buffer.len_chars()), "hello");
+
+        st.delete_forward();
+        assert_eq!(st.buffer.slice_to_string(0..st.buffer.len_chars()), "hello");
+
+        st.select_all();
+        assert!(st.cut_selection().is_none());
+        assert_eq!(st.buffer.slice_to_string(0..st.buffer.len_chars()), "hello");
+    }
+
+    #[test]
+    fn read_only_blocks_undo_redo() {
+        let mut st = state_from("hello");
+        st.move_line_end();
+        st.insert_str("!");
+        assert_eq!(
+            st.buffer.slice_to_string(0..st.buffer.len_chars()),
+            "hello!"
+        );
+        st.set_read_only(true);
+        st.undo();
+        // Read-only must not undo.
+        assert_eq!(
+            st.buffer.slice_to_string(0..st.buffer.len_chars()),
+            "hello!"
+        );
+        st.set_read_only(false);
+        st.undo();
+        assert_eq!(st.buffer.slice_to_string(0..st.buffer.len_chars()), "hello");
+    }
+
+    #[test]
+    fn read_only_allows_cursor_motion_and_selection() {
+        let mut st = state_from("hello");
+        st.set_read_only(true);
+        st.move_right();
+        st.move_right();
+        assert_eq!(st.cursor_line_col(), (0, 2));
+        st.select_all();
+        assert_eq!(st.selected_text().as_deref(), Some("hello"));
     }
 
     #[test]
