@@ -81,24 +81,64 @@ impl CdpTransport {
 
         // Read loop: parse incoming frames and broadcast them.
         tokio::spawn(async move {
-            while let Some(Ok(frame)) = ws_read.next().await {
-                if let Message::Text(text) = frame {
-                    let text_str: &str = &text;
-                    trace!(target: "atomio::cdp::raw", bytes = text_str.len(), "<- frame");
-                    match serde_json::from_str::<RawCdpMessage>(text_str) {
-                        Ok(raw) => {
-                            if let Some(msg) = CdpMessage::from_raw(raw) {
-                                // Ignore send errors -- just means no subscribers yet.
-                                let _ = events_tx_clone.send(msg);
+            let mut frame_count: u64 = 0;
+            while let Some(frame_result) = ws_read.next().await {
+                let frame = match frame_result {
+                    Ok(f) => f,
+                    Err(e) => {
+                        warn!(target: "atomio::cdp", error = %e, "WebSocket read error");
+                        break;
+                    }
+                };
+                match frame {
+                    Message::Text(text) => {
+                        frame_count += 1;
+                        let text_str: &str = &text;
+                        trace!(target: "atomio::cdp::raw", bytes = text_str.len(), "<- frame");
+                        match serde_json::from_str::<RawCdpMessage>(text_str) {
+                            Ok(raw) => {
+                                let preview = match (&raw.method, raw.id) {
+                                    (Some(m), _) => format!("event {m}"),
+                                    (None, Some(id)) => format!("response id={id}"),
+                                    _ => "<unknown>".into(),
+                                };
+                                debug!(
+                                    target: "atomio::cdp",
+                                    n = frame_count,
+                                    bytes = text_str.len(),
+                                    kind = %preview,
+                                    "<- frame"
+                                );
+                                if let Some(msg) = CdpMessage::from_raw(raw) {
+                                    // Ignore send errors -- just means no subscribers yet.
+                                    let _ = events_tx_clone.send(msg);
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    target: "atomio::cdp",
+                                    error = %e,
+                                    sample = %text_str.chars().take(120).collect::<String>(),
+                                    "failed to parse CDP frame"
+                                );
                             }
                         }
-                        Err(e) => {
-                            warn!(target: "atomio::cdp", error = %e, "failed to parse CDP frame");
-                        }
+                    }
+                    Message::Close(reason) => {
+                        info!(target: "atomio::cdp", ?reason, "remote sent close frame");
+                        break;
+                    }
+                    Message::Ping(_) | Message::Pong(_) => {}
+                    other => {
+                        debug!(target: "atomio::cdp", ?other, "ignoring non-text frame");
                     }
                 }
             }
-            debug!(target: "atomio::cdp", "read loop exited (WebSocket closed)");
+            info!(
+                target: "atomio::cdp",
+                frames_received = frame_count,
+                "read loop exited (WebSocket closed)"
+            );
         });
 
         Ok(Self {
@@ -111,6 +151,12 @@ impl CdpTransport {
     pub async fn send(&self, request: &CdpRequest) -> Result<u64, TransportError> {
         let json =
             serde_json::to_string(request).map_err(|e| TransportError::Send(e.to_string()))?;
+        debug!(
+            target: "atomio::cdp",
+            id = request.id,
+            method = %request.method,
+            "-> send"
+        );
         self.tx
             .send(json)
             .await

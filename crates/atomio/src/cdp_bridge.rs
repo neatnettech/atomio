@@ -132,8 +132,36 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                 info!(target: "atomio::bridge", "connect requested");
                 let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Scanning));
                 let targets = scan_localhost().await;
-                let Some((_, target)) = targets.into_iter().next() else {
+                if targets.is_empty() {
                     let reason = "no Metro targets found on localhost (is `expo start` running with a sim/device booted?)".to_string();
+                    warn!(target: "atomio::bridge", "{}", reason);
+                    let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Failed { reason }));
+                    continue;
+                }
+                // Log all candidates so users can see what was advertised.
+                for (base, t) in &targets {
+                    info!(
+                        target: "atomio::bridge",
+                        base = %base,
+                        id = %t.id,
+                        title = %t.title,
+                        desc = %t.description,
+                        "candidate target"
+                    );
+                }
+                // Pick first user app target. Skip `host.exp.Exponent`
+                // (Expo Go shell — no user JS) and `UI` connections (native
+                // view tree; user JS lives in the Bridgeless connection).
+                // Fallback to the first target if our heuristic finds none.
+                let pick = targets
+                    .iter()
+                    .find(|(_, t)| {
+                        !t.title.starts_with("host.exp.Exponent") && !t.description.contains("UI [")
+                    })
+                    .or_else(|| targets.first())
+                    .cloned();
+                let Some((_, target)) = pick else {
+                    let reason = "target list non-empty but selection failed".to_string();
                     warn!(target: "atomio::bridge", "{}", reason);
                     let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Failed { reason }));
                     continue;
