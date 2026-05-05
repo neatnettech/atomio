@@ -1,5 +1,6 @@
 {
   "crates/atomio": "0.0.0",
   "crates/editor_core": "0.0.0",
-  "crates/language": "0.0.0"
+  "crates/language": "0.0.0",
+  "crates/debugger": "0.0.0"
 }

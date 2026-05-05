@@ -4,6 +4,7 @@ members = [
     "crates/atomio",
     "crates/editor_core",
     "crates/language",
+    "crates/debugger",
 ]
 
 [workspace.package]
@@ -16,4 +17,5 @@ rust-version = "1.75"
 [workspace.dependencies]
 editor_core = { path = "crates/editor_core" }
 language = { path = "crates/language" }
+debugger = { path = "crates/debugger" }
 ropey = "1.6"
