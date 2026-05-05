@@ -35,11 +35,12 @@ jobs:
             atomio
             editor_core
             language
-            ai
-            ext_host_node
+            debugger
+            inspector
+            network
+            console
+            react_tree
             workspace
-            theme
-            sdk-ts
             docs
             ci
             release

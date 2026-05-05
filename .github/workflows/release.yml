@@ -37,7 +37,7 @@ jobs:
       - name: build release binary
         run: cargo build --release --workspace --locked
       - name: bundle, codesign, notarize, staple, package dmg
-        # TODO v0.1 flesh this out. Pseudocode:
+        # TODO flesh this out when ready for distribution. Pseudocode:
         #   1. Build target/release/atomio into an .app bundle with
         #      Info.plist, icon set, and entitlements.
         #   2. codesign --deep --force --options runtime --sign DEV_ID_APP atomio.app

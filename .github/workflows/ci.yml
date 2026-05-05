@@ -27,7 +27,7 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         # `cargo test` builds the whole workspace, so no separate
         # `cargo build` step is needed.
