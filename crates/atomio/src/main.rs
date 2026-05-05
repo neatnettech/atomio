@@ -9,8 +9,13 @@
 //! rendering the buffer. That split keeps the interesting logic
 //! unit-testable and the UI layer trivially replaceable.
 
-use std::path::PathBuf;
+mod cdp_bridge;
 
+use std::path::PathBuf;
+use std::time::Duration;
+
+use cdp_bridge::{ConnectionState, DebuggerBridge, DebuggerCommand, DebuggerEvent};
+use console::Console;
 use editor_core::{Buffer, CommandRegistry, EditorState};
 use gpui::{
     actions, div, prelude::*, px, rgb, size, Application, Bounds, ClipboardItem, Context,
@@ -47,6 +52,10 @@ actions!(
         TogglePalette,
         ConfirmPalette,
         DismissPalette,
+        Connect,
+        Disconnect,
+        ToggleConsole,
+        ClearConsole,
     ]
 );
 
@@ -77,6 +86,19 @@ fn highlight_color(kind: HighlightKind) -> u32 {
 }
 
 const DEFAULT_FG: u32 = 0xcdd6f4;
+
+/// Map a [`console::LogLevel`] to a rendering colour.
+fn log_level_color(level: console::LogLevel) -> u32 {
+    use console::LogLevel::*;
+    match level {
+        Log => 0xcdd6f4,
+        Info => 0x89b4fa,
+        Warn => 0xfab387,
+        Error => 0xf38ba8,
+        Debug => 0x9399b2,
+        Trace => 0x6c7086,
+    }
+}
 
 /// Split global byte-indexed [`Span`]s into per-line char-indexed runs.
 ///
@@ -142,6 +164,14 @@ struct AtomioWindow {
     palette_query: Option<String>,
     /// Index of the currently highlighted item in the filtered results.
     palette_selected: usize,
+    /// Console log buffer fed by the CDP bridge.
+    console: Console,
+    /// Whether the console pane is rendered.
+    console_visible: bool,
+    /// Current debugger connection state, mirrored from the worker thread.
+    connection: ConnectionState,
+    /// Bridge to the CDP worker thread. `None` until the runtime initialises it.
+    bridge: Option<DebuggerBridge>,
 }
 
 fn build_command_registry() -> CommandRegistry {
@@ -155,6 +185,10 @@ fn build_command_registry() -> CommandRegistry {
     reg.register("Edit: Paste", "paste");
     reg.register("Edit: Select All", "select_all");
     reg.register("View: Toggle Command Palette", "toggle_palette");
+    reg.register("View: Toggle Console", "toggle_console");
+    reg.register("Debug: Connect", "connect");
+    reg.register("Debug: Disconnect", "disconnect");
+    reg.register("Debug: Clear Console", "clear_console");
     reg
 }
 
@@ -547,7 +581,73 @@ impl AtomioWindow {
             "paste" => self.on_paste(&Paste, window, cx),
             "select_all" => self.on_select_all(&SelectAll, window, cx),
             "toggle_palette" => self.on_toggle_palette(&TogglePalette, window, cx),
+            "toggle_console" => self.on_toggle_console(&ToggleConsole, window, cx),
+            "connect" => self.on_connect(&Connect, window, cx),
+            "disconnect" => self.on_disconnect(&Disconnect, window, cx),
+            "clear_console" => self.on_clear_console(&ClearConsole, window, cx),
             _ => {}
+        }
+    }
+
+    fn on_toggle_console(&mut self, _: &ToggleConsole, _: &mut Window, cx: &mut Context<Self>) {
+        self.console_visible = !self.console_visible;
+        cx.notify();
+    }
+    fn on_clear_console(&mut self, _: &ClearConsole, _: &mut Window, cx: &mut Context<Self>) {
+        self.console.clear();
+        cx.notify();
+    }
+    fn on_connect(&mut self, _: &Connect, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(bridge) = &self.bridge {
+            let _ = bridge.commands.send(DebuggerCommand::Connect);
+            self.status = "scanning Metro...".into();
+        } else {
+            self.status = "debugger bridge not initialised".into();
+        }
+        cx.notify();
+    }
+    fn on_disconnect(&mut self, _: &Disconnect, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(bridge) = &self.bridge {
+            let _ = bridge.commands.send(DebuggerCommand::Disconnect);
+        }
+        cx.notify();
+    }
+
+    /// Drain pending events from the bridge and apply them to the window.
+    fn drain_bridge_events(&mut self, cx: &mut Context<Self>) {
+        let Some(bridge) = &self.bridge else { return };
+        let mut changed = false;
+        while let Ok(event) = bridge.events.try_recv() {
+            match event {
+                DebuggerEvent::State(state) => {
+                    self.status = match &state {
+                        ConnectionState::Disconnected => "disconnected".into(),
+                        ConnectionState::Scanning => "scanning Metro...".into(),
+                        ConnectionState::Connecting { ws_url } => {
+                            format!("connecting to {ws_url}").into()
+                        }
+                        ConnectionState::Connected { ws_url } => {
+                            format!("connected: {ws_url}").into()
+                        }
+                        ConnectionState::Failed { reason } => {
+                            format!("connect failed: {reason}").into()
+                        }
+                    };
+                    self.connection = state;
+                    changed = true;
+                }
+                DebuggerEvent::Log {
+                    level,
+                    message,
+                    location,
+                } => {
+                    self.console.push(level, message, location);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            cx.notify();
         }
     }
 
@@ -599,6 +699,11 @@ impl Focusable for AtomioWindow {
 
 impl Render for AtomioWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Drain any debugger events that arrived since the last render.
+        // Combined with the polling Task spawned in `init`, this means new
+        // entries appear within ~50ms of arriving from CDP.
+        self.drain_bridge_events(cx);
+
         let line_views = self.buffer_line_views();
         let gutter_width = {
             let digits = line_views.len().max(1).to_string().len();
@@ -608,6 +713,77 @@ impl Render for AtomioWindow {
         let cursor = self.cursor_label();
         let status = self.status.clone();
         let title = self.title();
+        let console_visible = self.console_visible;
+        let connection_label: SharedString = match &self.connection {
+            ConnectionState::Disconnected => "● disconnected".into(),
+            ConnectionState::Scanning => "● scanning".into(),
+            ConnectionState::Connecting { .. } => "● connecting".into(),
+            ConnectionState::Connected { .. } => "● connected".into(),
+            ConnectionState::Failed { .. } => "● failed".into(),
+        };
+        let connection_color: u32 = match &self.connection {
+            ConnectionState::Connected { .. } => 0xa6e3a1,
+            ConnectionState::Connecting { .. } | ConnectionState::Scanning => 0xfab387,
+            ConnectionState::Failed { .. } => 0xf38ba8,
+            ConnectionState::Disconnected => 0x6c7086,
+        };
+
+        // Build the console pane (conditionally). Each entry is rendered
+        // as a single row with a coloured level tag and the message text.
+        let console_pane: Option<gpui::Div> = if console_visible {
+            let entries: Vec<_> = self
+                .console
+                .entries()
+                .iter()
+                .rev()
+                .take(200)
+                .cloned()
+                .collect();
+            let mut pane = div()
+                .flex()
+                .flex_col()
+                .h(px(220.0))
+                .bg(rgb(0x181825))
+                .border_t_1()
+                .border_color(rgb(0x313244))
+                .child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_xs()
+                        .text_color(rgb(0x9399b2))
+                        .bg(rgb(0x11111b))
+                        .child(format!("Console — {} entries", self.console.len())),
+                );
+            let mut list = div().flex().flex_col().px_3().py_1().text_xs();
+            if entries.is_empty() {
+                list = list.child(
+                    div()
+                        .text_color(rgb(0x6c7086))
+                        .child("(no entries — connect to a Metro target via cmd+shift+d)"),
+                );
+            } else {
+                for entry in entries.into_iter().rev() {
+                    let tag_color = log_level_color(entry.level);
+                    let row = div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w(px(36.0))
+                                .text_color(rgb(tag_color))
+                                .child(entry.level.tag()),
+                        )
+                        .child(div().text_color(rgb(0xcdd6f4)).child(entry.message));
+                    list = list.child(row);
+                }
+            }
+            pane = pane.child(list);
+            Some(pane)
+        } else {
+            None
+        };
 
         // Build palette overlay if visible. Rendered as a Spotlight-style
         // floating panel: absolutely positioned, horizontally centred,
@@ -697,6 +873,10 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_toggle_palette))
             .on_action(cx.listener(Self::on_confirm_palette))
             .on_action(cx.listener(Self::on_dismiss_palette))
+            .on_action(cx.listener(Self::on_toggle_console))
+            .on_action(cx.listener(Self::on_clear_console))
+            .on_action(cx.listener(Self::on_connect))
+            .on_action(cx.listener(Self::on_disconnect))
             .on_key_down(cx.listener(Self::on_key_down))
             .flex()
             .flex_col()
@@ -765,17 +945,30 @@ impl Render for AtomioWindow {
                         div().flex().flex_row().child(gutter).child(row)
                     })),
             )
+            // Console pane (conditionally rendered).
+            .children(console_pane)
             // Footer / status line
             .child(
                 div()
                     .flex()
                     .justify_between()
+                    .items_center()
                     .px_4()
                     .py_1()
                     .bg(rgb(0x181825))
                     .text_xs()
                     .text_color(rgb(0x6c7086))
-                    .child(div().child(status))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_color(rgb(connection_color))
+                                    .child(connection_label),
+                            )
+                            .child(div().child(status)),
+                    )
                     .child(div().child(cursor)),
             )
             // Command palette — absolutely positioned, floats above the
@@ -904,6 +1097,9 @@ fn main() {
             KeyBinding::new("cmd-shift-p", TogglePalette, Some("atomio")),
             KeyBinding::new("enter", ConfirmPalette, Some("atomio")),
             KeyBinding::new("escape", DismissPalette, Some("atomio")),
+            KeyBinding::new("cmd-shift-d", Connect, Some("atomio")),
+            KeyBinding::new("cmd-shift-c", ToggleConsole, Some("atomio")),
+            KeyBinding::new("cmd-k", ClearConsole, Some("atomio")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(720.0), px(480.0)), cx);
@@ -916,22 +1112,40 @@ fn main() {
                 |_window, cx| {
                     let state = EditorState::new(buffer.clone());
                     let commands = build_command_registry();
+                    let bridge = cdp_bridge::spawn();
                     cx.new(|cx| AtomioWindow {
                         state,
                         commands,
-                        status: "type to edit · cmd+o open · cmd+s save · cmd+shift+p palette"
+                        status: "cmd+shift+p palette · cmd+shift+d connect · cmd+shift+c console"
                             .into(),
                         focus_handle: cx.focus_handle(),
                         palette_query: None,
                         palette_selected: 0,
+                        console: Console::new(),
+                        console_visible: true,
+                        connection: ConnectionState::Disconnected,
+                        bridge: Some(bridge),
                     })
                 },
             )
             .expect("failed to open atomio window");
 
         window
-            .update(cx, |view, window, _cx| {
+            .update(cx, |view, window, cx| {
                 window.focus(&view.focus_handle);
+                // Spawn a low-frequency tick task that nudges the window
+                // to drain the bridge channels and re-render. The render
+                // method itself does the drain; this just keeps the wheel
+                // turning when no other event is firing.
+                cx.spawn(async move |this, cx| loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                })
+                .detach();
             })
             .ok();
 
