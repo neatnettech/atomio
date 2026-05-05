@@ -13,9 +13,11 @@
 //! (see docs/ROADMAP.md — collab is out of scope for year one).
 
 pub mod buffer;
+pub mod command;
 pub mod selection;
 pub mod state;
 
 pub use buffer::Buffer;
+pub use command::CommandRegistry;
 pub use selection::Selection;
 pub use state::EditorState;
