@@ -17,6 +17,7 @@ use debugger::cdp::{debugger_enable, runtime_enable, CdpMessage};
 use debugger::metro::{fetch_source, scan_localhost};
 use debugger::scripts::Script;
 use debugger::transport::CdpTransport;
+use tracing::{debug, info, warn};
 
 /// Commands the UI sends to the worker thread.
 #[derive(Debug, Clone)]
@@ -115,10 +116,12 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
 
         match cmd {
             DebuggerCommand::Disconnect => {
+                info!(target: "atomio::bridge", "disconnect requested");
                 current = None;
                 let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Disconnected));
             }
             DebuggerCommand::FetchSource { url } => {
+                debug!(target: "atomio::bridge", url = %url, "fetch source");
                 let evt_tx = evt_tx.clone();
                 tokio::spawn(async move {
                     let body = fetch_source(&url).await;
@@ -126,15 +129,23 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                 });
             }
             DebuggerCommand::Connect => {
+                info!(target: "atomio::bridge", "connect requested");
                 let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Scanning));
                 let targets = scan_localhost().await;
                 let Some((_, target)) = targets.into_iter().next() else {
-                    let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Failed {
-                        reason: "no Metro targets found on localhost".into(),
-                    }));
+                    let reason = "no Metro targets found on localhost (is `expo start` running with a sim/device booted?)".to_string();
+                    warn!(target: "atomio::bridge", "{}", reason);
+                    let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Failed { reason }));
                     continue;
                 };
                 let ws_url = target.web_socket_debugger_url.clone();
+                info!(
+                    target: "atomio::bridge",
+                    target_id = %target.id,
+                    title = %target.title,
+                    ws_url = %ws_url,
+                    "picked target"
+                );
                 let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Connecting {
                     ws_url: ws_url.clone(),
                 }));
@@ -142,6 +153,7 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                 let transport = match CdpTransport::connect(&ws_url).await {
                     Ok(t) => t,
                     Err(e) => {
+                        warn!(target: "atomio::bridge", error = %e, "transport connect failed");
                         let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Failed {
                             reason: e.to_string(),
                         }));
