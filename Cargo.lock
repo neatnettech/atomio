@@ -945,6 +945,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "console"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "const-random"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"

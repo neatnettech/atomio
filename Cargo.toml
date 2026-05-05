@@ -5,6 +5,7 @@ members = [
     "crates/editor_core",
     "crates/language",
     "crates/debugger",
+    "crates/console",
 ]
 
 [workspace.package]
@@ -18,4 +19,5 @@ rust-version = "1.75"
 editor_core = { path = "crates/editor_core" }
 language = { path = "crates/language" }
 debugger = { path = "crates/debugger" }
+console = { path = "crates/console" }
 ropey = "1.6"

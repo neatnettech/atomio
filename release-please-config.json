@@ -24,6 +24,11 @@
       "package-name": "debugger",
       "skip-github-release": true,
       "changelog-path": "../../CHANGELOG.md"
+    },
+    "crates/console": {
+      "package-name": "console",
+      "skip-github-release": true,
+      "changelog-path": "../../CHANGELOG.md"
     }
   }
 }
