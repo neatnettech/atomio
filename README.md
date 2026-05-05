@@ -4,42 +4,48 @@
 [![ci](https://github.com/neatnettech/atomio/actions/workflows/ci.yml/badge.svg)](https://github.com/neatnettech/atomio/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> **Atom's soul. VS Code's ecosystem. Zed's speed.**
-> Hackable to the core. Again.
+> **A native, GPU-accelerated debugger for React Native and Expo.**
+> Inspect variables. Track execution. Edit code. All in one window.
 
-> **Status: pre-alpha.** The trunk builds and opens a window. There is no editor yet. Expect breakage until `v0.1.0`. See [the roadmap](docs/ROADMAP.md).
+> **Status: pre-alpha.** The trunk builds and opens a window with a working code editor. Debugger connection, variable inspector, and breakpoint UI are under active development. See [the roadmap](docs/ROADMAP.md).
 
-**atomio** is a revival of the [Atom editor](https://github.com/atom/atom) — rebuilt from scratch in Rust on a native, GPU-accelerated stack, designed to feel as hackable as Atom, run the VS Code extensions you already use, and ship with an AI agent that lives *inside* the editor.
+**atomio** is a standalone debugger and code editor for [Expo](https://expo.dev) / React Native developers -- built from scratch in Rust on a native, GPU-accelerated stack. It connects to your running Expo app via the Chrome DevTools Protocol (CDP) and Hermes, giving you breakpoints, variable inspection, call stack navigation, network monitoring, and a full code editor in a single native macOS window.
 
-Built solo, after hours, in the open. macOS (Apple Silicon) first. MIT licensed. No CLA.
+macOS (Apple Silicon) first. MIT licensed. No CLA.
 
 ## Why
 
-Atom was archived in December 2022. The Electron + CoffeeScript stack couldn't keep up — but the *philosophy* (hackable, community-first, beautiful by default) is more relevant than ever in an editor landscape split between VS Code's ecosystem and Zed's speed. atomio reclaims that philosophy on a stack that can actually compete.
+React Native debugging is fragmented. You bounce between Chrome DevTools, Flipper (archived), React Native Debugger (unmaintained), VS Code's debugger extension, and Expo's dev tools browser UI. None of them are purpose-built for Expo. None of them are fast. atomio consolidates the debugger workflow into a single native app that launches instantly, connects to your Metro bundler, and stays out of your way.
 
 ## What
 
-- **Rust + [`gpui`](https://github.com/zed-industries/zed) + Metal** — native, GPU-rendered, ProMotion-smooth.
-- **Tree-sitter** for syntax (Atom invented it — we're bringing it home).
-- **VS Code extension compatibility** via a Node sidecar host.
-- **AI agent built in** — pluggable providers (Anthropic, OpenAI, Ollama). Inline edits, not a chat sidebar.
-- **WASM + TypeScript SDK** for native plugins, with an API that echoes Atom's beloved `atom.workspace`.
-- **Single signed `.dmg`**, auto-updating, no Electron.
+- **Rust + [`gpui`](https://github.com/zed-industries/zed) + Metal** -- native, GPU-rendered, 120fps on ProMotion.
+- **CDP / Hermes debugger protocol** -- connect to any running Expo / React Native app.
+- **Breakpoints** -- set, hit, continue, step over, step into, step out.
+- **Variable inspector** -- scopes, watch expressions, inline values.
+- **Call stack** -- navigate frames, inspect closures.
+- **Network inspector** -- HTTP requests, WebSocket frames, timing.
+- **Console** -- log output with source mapping.
+- **React component tree** -- via React DevTools protocol integration.
+- **Code editor** -- syntax-highlighted, with undo/redo, selection, clipboard. Edit and hot-reload without leaving the debugger.
+- **Tree-sitter** highlighting for TypeScript, TSX, JavaScript, JSON.
+- **Command palette** -- cmd+shift+p for every action.
+- **Single signed `.dmg`**, auto-updating, no Electron, no browser tab.
 
 ## Status
 
-**Pre-v0.0.** This repo is a few hours old. The roadmap lives in [`docs/ROADMAP.md`](docs/ROADMAP.md). Follow along — this is being built in public.
+**Pre-v0.1.** The code editor works (buffer, selection, undo/redo, syntax highlighting, command palette). The debugger connection layer is the active focus. Follow along -- this is being built in public.
 
 ## Roadmap (TL;DR)
 
 | Version | Theme | What ships |
 |---|---|---|
-| v0.0 | "Hello, atom" | gpui window, basic editing, brand |
-| v0.1 | "It edits" | tree-sitter, command palette, file tree |
-| v0.2 | "It speaks LSP" | LSP, splits, git gutter |
-| v0.3 | "It has an ecosystem" | VS Code extension host |
-| v0.4 | "It's an AI editor" | inline AI agent |
-| v1.0 | "It's hackable" | WASM plugin runtime + TS SDK |
+| v0.0 | "It edits" | gpui window, code editor, syntax highlighting, command palette |
+| v0.1 | "It connects" | CDP client, Metro discovery, Hermes attach, console log stream |
+| v0.2 | "It debugs" | breakpoints, step controls, variable inspector, call stack |
+| v0.3 | "It inspects" | network inspector, React component tree, performance timeline |
+| v0.4 | "It flows" | file tree, fuzzy finder, multi-pane splits, integrated hot reload |
+| v1.0 | "Ship it" | polish, auto-update, documentation, stable CDP protocol surface |
 
 Full roadmap: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
@@ -53,8 +59,8 @@ Requires:
 
 - Rust stable
 - macOS 13+ on Apple Silicon
-- Full Xcode (not just Command Line Tools) — gpui compiles Metal shaders at build time and needs the `metal` compiler bundled with Xcode.
+- Full Xcode (not just Command Line Tools) -- gpui compiles Metal shaders at build time and needs the `metal` compiler bundled with Xcode.
 
 ## License
 
-MIT. Atom is a trademark of GitHub. atomio is an independent project, not affiliated with or endorsed by GitHub or the original Atom team — built in tribute.
+MIT.
