@@ -12,4 +12,4 @@ path = "src/main.rs"
 editor_core.workspace = true
 language.workspace = true
 gpui = "0.2"
-rfd = "0.15"
+rfd = "0.17"
