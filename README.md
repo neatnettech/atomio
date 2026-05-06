@@ -13,6 +13,41 @@
 
 macOS (Apple Silicon) first. MIT licensed. No CLA.
 
+## The vision
+
+atomio is **dark-only**, **Zed-minimal with Atom warmth**, all-in-one. Editor, debugger, console, simulator, component tree, and profiler in a single window -- no browser tabs, no Electron, no context-switching.
+
+Live interactive mock: open [`docs/design/handoff/project/atomio.html`](docs/design/handoff/project/atomio.html) in any modern browser (no build step).
+
+```
++----------------------------------------------------------------------+
+| ●●●           foaf-mobile  · feat/checkout                           |
++----+--------------------------------+--------------------------------+
+| 📁 |  app/                          |  Debugger                      |
+| 🐛 |   (tabs)/                      |   ▶  Continue   ⏭  Step over   |
+| 📱 |     index.tsx     [active]     |   ↪  Step into  ⤴  Step out    |
+| 🧩 |     cart.tsx                   |   ⏸  Pause                     |
+| 📊 |   _layout.tsx                  |  Call stack                    |
+| 📜 |                                |   ▸ checkout()  cart.tsx:42    |
+|    |  ────────────────────────────  |   ▸ onPress     cart.tsx:18    |
+|    |  ▶  42  const total = items    |  Variables                     |
+|    |  ●  43    .reduce((a,b) =>     |   ▸ Local                      |
+|    |     44      a + b.price, 0);   |     items:  Array(3)           |
+|    |     45                         |     total:  126.50             |
+|    |     46  return (               |   ▸ Closure                    |
+|    |     47    <View>               |   ▸ Global                     |
+|    |     48      <Text>{total}</T>  |  Watch                         |
+|    |     49    </View>              |   total * 1.08  →  136.62      |
+|    |     50  );                     |  Breakpoints (2)               |
++----+--------------------------------+--------------------------------+
+| ● connected  ws://localhost:8081/inspector/...   ln 43 · col 1   tsx |
++----------------------------------------------------------------------+
+```
+
+**Accent green** `#3ecf8e` for run states. **Calm syntax palette** (Zed One Dark adjacent). **SF Pro + SF Mono.** **Spotlight-style command palette** (Cmd+Shift+P) drives everything.
+
+Full design spec: [`docs/design.md`](docs/design.md). Handoff bundle: [`docs/design/handoff/`](docs/design/handoff/).
+
 ## Why
 
 React Native debugging is fragmented. You bounce between Chrome DevTools, Flipper (archived), React Native Debugger (unmaintained), VS Code's debugger extension, and Expo's dev tools browser UI. None of them are purpose-built for Expo. None of them are fast. atomio consolidates the debugger workflow into a single native app that launches instantly, connects to your Metro bundler, and stays out of your way.
