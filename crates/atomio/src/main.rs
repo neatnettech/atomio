@@ -10,6 +10,7 @@
 //! unit-testable and the UI layer trivially replaceable.
 
 mod cdp_bridge;
+mod theme;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -78,30 +79,30 @@ struct LineView {
 /// Catppuccin Mocha, matching the rest of the window chrome.
 fn highlight_color(kind: HighlightKind) -> u32 {
     match kind {
-        HighlightKind::Keyword => 0xcba6f7,   // mauve
-        HighlightKind::String => 0xa6e3a1,    // green
-        HighlightKind::Number => 0xfab387,    // peach
-        HighlightKind::Comment => 0x6c7086,   // overlay0
-        HighlightKind::Type => 0xf9e2af,      // yellow
-        HighlightKind::Function => 0x89b4fa,  // blue
-        HighlightKind::Attribute => 0xf38ba8, // red
-        HighlightKind::Property => 0xf5c2e7,  // pink
-        HighlightKind::Constant => 0xfab387,  // peach (same as number)
+        HighlightKind::Keyword => theme::SX_KW,
+        HighlightKind::String => theme::SX_STR,
+        HighlightKind::Number => theme::SX_NUM,
+        HighlightKind::Comment => theme::SX_COM,
+        HighlightKind::Type => theme::SX_TYPE,
+        HighlightKind::Function => theme::SX_FN,
+        HighlightKind::Attribute => theme::SX_PROP,
+        HighlightKind::Property => theme::SX_PROP,
+        HighlightKind::Constant => theme::SX_NUM,
     }
 }
 
-const DEFAULT_FG: u32 = 0xcdd6f4;
+const DEFAULT_FG: u32 = theme::SX_PL;
 
 /// Map a [`console::LogLevel`] to a rendering colour.
 fn log_level_color(level: console::LogLevel) -> u32 {
     use console::LogLevel::*;
     match level {
-        Log => 0xcdd6f4,
-        Info => 0x89b4fa,
-        Warn => 0xfab387,
-        Error => 0xf38ba8,
-        Debug => 0x9399b2,
-        Trace => 0x6c7086,
+        Log => theme::TX_1,
+        Info => theme::INFO,
+        Warn => theme::WARN,
+        Error => theme::ERROR,
+        Debug => theme::TX_2,
+        Trace => theme::TX_3,
     }
 }
 
@@ -788,10 +789,10 @@ impl Render for AtomioWindow {
             ConnectionState::Failed { .. } => "● failed".into(),
         };
         let connection_color: u32 = match &self.connection {
-            ConnectionState::Connected { .. } => 0xa6e3a1,
-            ConnectionState::Connecting { .. } | ConnectionState::Scanning => 0xfab387,
-            ConnectionState::Failed { .. } => 0xf38ba8,
-            ConnectionState::Disconnected => 0x6c7086,
+            ConnectionState::Connected { .. } => theme::ACCENT,
+            ConnectionState::Connecting { .. } | ConnectionState::Scanning => theme::WARN,
+            ConnectionState::Failed { .. } => theme::ERROR,
+            ConnectionState::Disconnected => theme::TX_4,
         };
 
         // Build the console pane (conditionally). Each entry is rendered
@@ -809,16 +810,16 @@ impl Render for AtomioWindow {
                 .flex()
                 .flex_col()
                 .h(px(220.0))
-                .bg(rgb(0x181825))
+                .bg(rgb(theme::BG_2))
                 .border_t_1()
-                .border_color(rgb(0x313244))
+                .border_color(rgb(theme::LINE_1))
                 .child(
                     div()
                         .px_3()
                         .py_1()
                         .text_xs()
-                        .text_color(rgb(0x9399b2))
-                        .bg(rgb(0x11111b))
+                        .text_color(rgb(theme::TX_3))
+                        .bg(rgb(theme::BG_0))
                         .child(format!(
                             "Console — {} entries · {} scripts loaded",
                             self.console.len(),
@@ -829,7 +830,7 @@ impl Render for AtomioWindow {
             if entries.is_empty() {
                 list = list.child(
                     div()
-                        .text_color(rgb(0x6c7086))
+                        .text_color(rgb(theme::TX_4))
                         .child("(no entries — connect to a Metro target via cmd+shift+d)"),
                 );
             } else {
@@ -845,7 +846,7 @@ impl Render for AtomioWindow {
                                 .text_color(rgb(tag_color))
                                 .child(entry.level.tag()),
                         )
-                        .child(div().text_color(rgb(0xcdd6f4)).child(entry.message));
+                        .child(div().text_color(rgb(theme::TX_1)).child(entry.message));
                     list = list.child(row);
                 }
             }
@@ -866,18 +867,18 @@ impl Render for AtomioWindow {
                 .flex()
                 .flex_col()
                 .w(px(440.0))
-                .bg(rgb(0x313244))
+                .bg(rgb(theme::BG_4))
                 .rounded(px(8.0))
                 .py_1()
                 .shadow_lg()
                 .border_1()
-                .border_color(rgb(0x45475a))
+                .border_color(rgb(theme::LINE_3))
                 .child(
                     div()
                         .px_3()
                         .py_2()
                         .text_sm()
-                        .text_color(rgb(0xcdd6f4))
+                        .text_color(rgb(theme::TX_1))
                         .child(if query.is_empty() {
                             "> type to search...".to_string()
                         } else {
@@ -885,16 +886,20 @@ impl Render for AtomioWindow {
                         }),
                 );
             if !matches.is_empty() {
-                inner = inner.child(div().h(px(1.0)).mx_2().bg(rgb(0x45475a)));
+                inner = inner.child(div().h(px(1.0)).mx_2().bg(rgb(theme::LINE_2)));
             }
             for (i, m) in matches.iter().take(10).enumerate() {
-                let bg = if i == selected { 0x45475a } else { 0x313244 };
+                let bg = if i == selected {
+                    theme::BG_3
+                } else {
+                    theme::BG_4
+                };
                 inner = inner.child(
                     div()
                         .px_3()
                         .py_1()
                         .text_sm()
-                        .text_color(rgb(0xcdd6f4))
+                        .text_color(rgb(theme::TX_1))
                         .bg(rgb(bg))
                         .rounded(px(4.0))
                         .mx_1()
@@ -953,8 +958,8 @@ impl Render for AtomioWindow {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0x1e1e2e))
-            .text_color(rgb(0xcdd6f4))
+            .bg(rgb(theme::BG_1))
+            .text_color(rgb(theme::TX_1))
             // Header
             .child(
                 div()
@@ -962,9 +967,11 @@ impl Render for AtomioWindow {
                     .flex_col()
                     .px_4()
                     .py_2()
-                    .bg(rgb(0x181825))
-                    .child(div().text_sm().text_color(rgb(0xf5e0dc)).child(title))
-                    .child(div().text_xs().text_color(rgb(0x9399b2)).child(subtitle)),
+                    .bg(rgb(theme::BG_2))
+                    .border_b_1()
+                    .border_color(rgb(theme::LINE_1))
+                    .child(div().text_sm().text_color(rgb(theme::ACCENT)).child(title))
+                    .child(div().text_xs().text_color(rgb(theme::TX_3)).child(subtitle)),
             )
             // Buffer pane: gutter + text
             .child(
@@ -973,7 +980,7 @@ impl Render for AtomioWindow {
                     .py_4()
                     .flex()
                     .flex_col()
-                    .text_color(rgb(0xa6e3a1))
+                    .text_color(rgb(theme::TX_1))
                     .children(line_views.into_iter().map(move |lv| {
                         let LineView {
                             number,
@@ -987,7 +994,7 @@ impl Render for AtomioWindow {
                             .pr_2()
                             .flex()
                             .justify_end()
-                            .text_color(rgb(0x6c7086))
+                            .text_color(rgb(theme::TX_5))
                             .child(format!("{number}"));
 
                         let runs = build_runs(&text, caret, selection, &highlights);
@@ -995,13 +1002,18 @@ impl Render for AtomioWindow {
                         for run in runs {
                             match run {
                                 Run::Caret => {
-                                    row = row.child(div().w(px(2.0)).h(px(18.0)).bg(rgb(0xf5e0dc)));
+                                    row = row
+                                        .child(div().w(px(2.0)).h(px(18.0)).bg(rgb(theme::ACCENT)));
                                 }
                                 Run::Text { text, fg, selected } => {
                                     if text.is_empty() {
                                         continue;
                                     }
-                                    let bg = if selected { 0x45475a } else { 0x1e1e2e };
+                                    let bg = if selected {
+                                        theme::ACCENT_SOFT
+                                    } else {
+                                        theme::BG_1
+                                    };
                                     row = row
                                         .child(div().bg(rgb(bg)).text_color(rgb(fg)).child(text));
                                 }
@@ -1027,9 +1039,11 @@ impl Render for AtomioWindow {
                     .items_center()
                     .px_4()
                     .py_1()
-                    .bg(rgb(0x181825))
+                    .bg(rgb(theme::BG_2))
+                    .border_t_1()
+                    .border_color(rgb(theme::LINE_1))
                     .text_xs()
-                    .text_color(rgb(0x6c7086))
+                    .text_color(rgb(theme::TX_3))
                     .child(
                         div()
                             .flex()
