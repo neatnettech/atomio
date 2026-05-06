@@ -21,7 +21,7 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         with:
           # Config files drive everything (package name, changelog path,
           # v0.x bump behavior). See release-please-config.json and
