@@ -13,6 +13,7 @@
 //! tokio runtime, connects via this crate, and bridges events to the gpui
 //! thread through channels.
 
+pub mod breakpoints;
 pub mod cdp;
 pub mod metro;
 pub mod scripts;
