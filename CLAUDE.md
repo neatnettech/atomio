@@ -132,6 +132,10 @@ All bound via `actions!` + `KeyBinding::new` in the `atomio` key context.
 - Don't put emojis in any file.
 - Don't implement custom debugger protocols -- build on CDP.
 
+## Visual design
+
+The visual target lives in [`docs/design.md`](docs/design.md), backed by an interactive HTML mock at [`docs/design/handoff/project/atomio.html`](docs/design/handoff/project/atomio.html). When implementing UI, **match the prototype**: same colors, spacing, typography, layout. Map CSS tokens to constants in code, never sprinkle hex literals.
+
 ## Useful pointers
 
 - **gpui source** is vendored at `~/.cargo/registry/src/index.crates.io-*/gpui-0.2.2/`. When the API surface is unclear, grep there before guessing.
