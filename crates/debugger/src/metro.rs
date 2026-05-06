@@ -12,6 +12,7 @@
 
 use serde::Deserialize;
 use std::time::Duration;
+use tracing::{debug, info, warn};
 
 /// A debuggable target advertised by Metro / Hermes.
 #[derive(Debug, Clone, Deserialize)]
@@ -44,10 +45,31 @@ pub struct DebugTarget {
 /// failure.
 pub async fn discover_targets(base_url: &str) -> Vec<DebugTarget> {
     let url = format!("{}/json/list", base_url.trim_end_matches('/'));
-    let Ok(response) = tokio::time::timeout(Duration::from_secs(2), fetch_json(&url)).await else {
-        return Vec::new();
-    };
-    response.unwrap_or_default()
+    debug!(target: "atomio::metro", url = %url, "GET /json/list");
+    match tokio::time::timeout(Duration::from_secs(2), fetch_json(&url)).await {
+        Ok(Ok(targets)) => {
+            debug!(
+                target: "atomio::metro",
+                base = %base_url,
+                count = targets.len(),
+                "discovered targets"
+            );
+            targets
+        }
+        Ok(Err(err)) => {
+            debug!(
+                target: "atomio::metro",
+                base = %base_url,
+                error = %err,
+                "no targets (fetch error)"
+            );
+            Vec::new()
+        }
+        Err(_) => {
+            debug!(target: "atomio::metro", base = %base_url, "no targets (timeout)");
+            Vec::new()
+        }
+    }
 }
 
 /// Probe common Expo / Metro ports on localhost and return all targets found.
@@ -55,6 +77,7 @@ pub async fn discover_targets(base_url: &str) -> Vec<DebugTarget> {
 /// Scans ports concurrently with a 2-second timeout per port.
 pub async fn scan_localhost() -> Vec<(String, DebugTarget)> {
     let ports = [8081, 19000, 19001, 19002, 19003, 19004, 19005, 19006, 8082];
+    info!(target: "atomio::metro", ports = ?ports, "scanning Metro on localhost");
     let mut handles = Vec::new();
     for port in ports {
         let base_url = format!("http://localhost:{port}");
@@ -72,6 +95,16 @@ pub async fn scan_localhost() -> Vec<(String, DebugTarget)> {
             all.extend(results);
         }
     }
+    if all.is_empty() {
+        warn!(target: "atomio::metro", "no Metro targets on any port — is `expo start` running and a sim/device booted?");
+    } else {
+        info!(
+            target: "atomio::metro",
+            count = all.len(),
+            first_url = %all[0].1.web_socket_debugger_url,
+            "scan complete"
+        );
+    }
     all
 }
 
@@ -82,10 +115,21 @@ pub async fn scan_localhost() -> Vec<(String, DebugTarget)> {
 /// Wrapped in a 5-second timeout. Errors are coalesced into a single
 /// string for ease of UI display.
 pub async fn fetch_source(url: &str) -> Result<String, String> {
-    tokio::time::timeout(Duration::from_secs(5), http_get(url))
+    debug!(target: "atomio::metro", url = %url, "fetch_source");
+    let result = tokio::time::timeout(Duration::from_secs(5), http_get(url))
         .await
         .map_err(|_| "request timed out".to_string())?
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    match &result {
+        Ok(body) => debug!(
+            target: "atomio::metro",
+            url = %url,
+            bytes = body.len(),
+            "fetch_source ok"
+        ),
+        Err(e) => warn!(target: "atomio::metro", url = %url, error = %e, "fetch_source failed"),
+    }
+    result
 }
 
 /// Minimal HTTP GET that returns parsed JSON for the discovery endpoint.

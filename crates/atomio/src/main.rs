@@ -58,6 +58,7 @@ actions!(
         ToggleConsole,
         ClearConsole,
         OpenFirstScript,
+        OpenLogFile,
     ]
 );
 
@@ -196,6 +197,7 @@ fn build_command_registry() -> CommandRegistry {
     reg.register("Debug: Disconnect", "disconnect");
     reg.register("Debug: Clear Console", "clear_console");
     reg.register("Debug: Open First Script", "open_first_script");
+    reg.register("Debug: Open Log File", "open_log_file");
     reg
 }
 
@@ -589,6 +591,7 @@ impl AtomioWindow {
             "disconnect" => self.on_disconnect(&Disconnect, window, cx),
             "clear_console" => self.on_clear_console(&ClearConsole, window, cx),
             "open_first_script" => self.on_open_first_script(&OpenFirstScript, window, cx),
+            "open_log_file" => self.on_open_log_file(&OpenLogFile, window, cx),
             _ => {}
         }
     }
@@ -599,6 +602,20 @@ impl AtomioWindow {
     }
     fn on_clear_console(&mut self, _: &ClearConsole, _: &mut Window, cx: &mut Context<Self>) {
         self.console.clear();
+        cx.notify();
+    }
+    fn on_open_log_file(&mut self, _: &OpenLogFile, _: &mut Window, cx: &mut Context<Self>) {
+        let path = log_file_path();
+        match Buffer::open(&path) {
+            Ok(buf) => {
+                self.state.replace_buffer(buf);
+                self.state.set_read_only(true);
+                self.status = format!("opened log: {}", path.display()).into();
+            }
+            Err(e) => {
+                self.status = format!("open log failed: {e}").into();
+            }
+        }
         cx.notify();
     }
     fn on_open_first_script(
@@ -929,6 +946,7 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_toggle_console))
             .on_action(cx.listener(Self::on_clear_console))
             .on_action(cx.listener(Self::on_open_first_script))
+            .on_action(cx.listener(Self::on_open_log_file))
             .on_action(cx.listener(Self::on_connect))
             .on_action(cx.listener(Self::on_disconnect))
             .on_key_down(cx.listener(Self::on_key_down))
@@ -1117,7 +1135,67 @@ fn load_initial_buffer() -> Buffer {
     buf
 }
 
+/// Resolve the path where atomio's diagnostic log lives, creating parent
+/// directories if needed. Mirrors the macOS convention
+/// `~/Library/Logs/atomio/atomio.log`.
+fn log_file_path() -> PathBuf {
+    let base = dirs::home_dir()
+        .map(|h| h.join("Library").join("Logs").join("atomio"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/atomio"));
+    let _ = std::fs::create_dir_all(&base);
+    base.join("atomio.log")
+}
+
+/// Initialise tracing subscribers. Logs go to stderr (visible when atomio
+/// is launched from a terminal) and to a rotating file at
+/// `~/Library/Logs/atomio/atomio.log`. Filter via `RUST_LOG`; defaults to
+/// `info` for `atomio`/`debugger`, `warn` for everything else.
+fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
+    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+    let log_path = log_file_path();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
+
+    let (file_writer, guard) = match file {
+        Some(f) => tracing_appender::non_blocking(f),
+        // If we can't open the file, fall back to a sink. The stderr
+        // layer still works.
+        None => tracing_appender::non_blocking(std::io::sink()),
+    };
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn,atomio=info,debugger=info,console=info"));
+
+    let stderr_layer = fmt::layer().with_target(true).with_writer(std::io::stderr);
+    let file_layer = fmt::layer()
+        .with_target(true)
+        .with_ansi(false)
+        .with_writer(file_writer);
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stderr_layer)
+        .with(file_layer)
+        .init();
+
+    tracing::info!(
+        target: "atomio",
+        log_path = %log_path.display(),
+        "atomio v{} starting",
+        env!("CARGO_PKG_VERSION")
+    );
+
+    guard
+}
+
 fn main() {
+    // Hold the guard for the lifetime of main so non-blocking writer flushes.
+    let _log_guard = init_logging();
+
     let buffer = load_initial_buffer();
 
     Application::new().run(move |cx| {

@@ -16,6 +16,7 @@ use crate::cdp::{CdpMessage, CdpRequest, RawCdpMessage};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
+use tracing::{debug, info, trace, warn};
 
 /// Capacity of the broadcast channel for incoming CDP messages.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -55,9 +56,14 @@ impl CdpTransport {
     /// Returns a transport handle; the connection runs on the provided
     /// tokio runtime until the WebSocket closes or the transport is dropped.
     pub async fn connect(ws_url: &str) -> Result<Self, TransportError> {
+        info!(target: "atomio::cdp", url = %ws_url, "connecting WebSocket");
         let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
             .await
-            .map_err(|e| TransportError::Connect(e.to_string()))?;
+            .map_err(|e| {
+                warn!(target: "atomio::cdp", url = %ws_url, error = %e, "WebSocket connect failed");
+                TransportError::Connect(e.to_string())
+            })?;
+        debug!(target: "atomio::cdp", url = %ws_url, "WebSocket open");
 
         let (mut ws_write, mut ws_read) = ws_stream.split();
         let (tx, mut rx) = mpsc::channel::<String>(64);
@@ -78,14 +84,21 @@ impl CdpTransport {
             while let Some(Ok(frame)) = ws_read.next().await {
                 if let Message::Text(text) = frame {
                     let text_str: &str = &text;
-                    if let Ok(raw) = serde_json::from_str::<RawCdpMessage>(text_str) {
-                        if let Some(msg) = CdpMessage::from_raw(raw) {
-                            // Ignore send errors -- just means no subscribers yet.
-                            let _ = events_tx_clone.send(msg);
+                    trace!(target: "atomio::cdp::raw", bytes = text_str.len(), "<- frame");
+                    match serde_json::from_str::<RawCdpMessage>(text_str) {
+                        Ok(raw) => {
+                            if let Some(msg) = CdpMessage::from_raw(raw) {
+                                // Ignore send errors -- just means no subscribers yet.
+                                let _ = events_tx_clone.send(msg);
+                            }
+                        }
+                        Err(e) => {
+                            warn!(target: "atomio::cdp", error = %e, "failed to parse CDP frame");
                         }
                     }
                 }
             }
+            debug!(target: "atomio::cdp", "read loop exited (WebSocket closed)");
         });
 
         Ok(Self {
