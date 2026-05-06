@@ -14,7 +14,7 @@ language.workspace = true
 debugger.workspace = true
 console.workspace = true
 gpui = "0.2"
-rfd = "0.15"
+rfd = "0.17"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net"] }
 serde_json = "1"
 tracing = "0.1"
