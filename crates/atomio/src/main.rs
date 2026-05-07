@@ -21,9 +21,9 @@ use debugger::breakpoints::BreakpointRegistry;
 use debugger::scripts::ScriptRegistry;
 use editor_core::{Buffer, CommandRegistry, EditorState};
 use gpui::{
-    actions, div, prelude::*, px, rgb, size, Application, Bounds, ClipboardItem, Context,
-    FocusHandle, Focusable, KeyBinding, KeyDownEvent, Render, SharedString, Window, WindowBounds,
-    WindowOptions,
+    actions, div, point, prelude::*, px, rgb, size, Application, Bounds, ClipboardItem, Context,
+    FocusHandle, Focusable, KeyBinding, KeyDownEvent, Render, SharedString, TitlebarOptions,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowOptions,
 };
 use language::{highlight, HighlightKind, Language, Span};
 
@@ -66,8 +66,54 @@ actions!(
         DebugStepInto,
         DebugStepOut,
         DebugPause,
+        ShowFiles,
+        ShowDebugger,
+        ShowSimulator,
+        ShowComponents,
+        ShowProfiler,
+        ShowConsole,
     ]
 );
+
+/// Right-dock pane selector. Mirrors the activity-bar items in the design
+/// spec; only [`DockPane::Console`] and [`DockPane::Files`] are functional
+/// today, the others render placeholders pointing at the milestone where
+/// they'll land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DockPane {
+    Files,
+    Debugger,
+    Simulator,
+    Components,
+    Profiler,
+    Console,
+}
+
+impl DockPane {
+    fn label(self) -> &'static str {
+        match self {
+            DockPane::Files => "Files",
+            DockPane::Debugger => "Debugger",
+            DockPane::Simulator => "Simulator",
+            DockPane::Components => "Components",
+            DockPane::Profiler => "Profiler",
+            DockPane::Console => "Console",
+        }
+    }
+
+    /// Single-character glyph for the activity bar. Real lucide-style icons
+    /// land in a follow-up PR; for now a calm monospace symbol.
+    fn glyph(self) -> &'static str {
+        match self {
+            DockPane::Files => "F",
+            DockPane::Debugger => "D",
+            DockPane::Simulator => "S",
+            DockPane::Components => "C",
+            DockPane::Profiler => "P",
+            DockPane::Console => "L",
+        }
+    }
+}
 
 struct LineView {
     number: usize,
@@ -193,6 +239,8 @@ struct AtomioWindow {
     /// Last paused-frames payload (raw CDP `callFrames`). Decoded on demand
     /// when rendering the call stack.
     paused_frames: Option<serde_json::Value>,
+    /// Currently active right-dock pane.
+    dock: DockPane,
 }
 
 fn build_command_registry() -> CommandRegistry {
@@ -217,6 +265,12 @@ fn build_command_registry() -> CommandRegistry {
     reg.register("Debug: Step Into (F11)", "debug_step_into");
     reg.register("Debug: Step Out (Shift+F11)", "debug_step_out");
     reg.register("Debug: Pause", "debug_pause");
+    reg.register("View: Files Pane", "show_files");
+    reg.register("View: Debugger Pane", "show_debugger");
+    reg.register("View: Simulator Pane", "show_simulator");
+    reg.register("View: Components Pane", "show_components");
+    reg.register("View: Profiler Pane", "show_profiler");
+    reg.register("View: Console Pane", "show_console");
     reg
 }
 
@@ -616,6 +670,12 @@ impl AtomioWindow {
             "debug_step_into" => self.on_debug_step_into(&DebugStepInto, window, cx),
             "debug_step_out" => self.on_debug_step_out(&DebugStepOut, window, cx),
             "debug_pause" => self.on_debug_pause(&DebugPause, window, cx),
+            "show_files" => self.on_show_files(&ShowFiles, window, cx),
+            "show_debugger" => self.on_show_debugger(&ShowDebugger, window, cx),
+            "show_simulator" => self.on_show_simulator(&ShowSimulator, window, cx),
+            "show_components" => self.on_show_components(&ShowComponents, window, cx),
+            "show_profiler" => self.on_show_profiler(&ShowProfiler, window, cx),
+            "show_console" => self.on_show_console(&ShowConsole, window, cx),
             _ => {}
         }
     }
@@ -707,6 +767,28 @@ impl AtomioWindow {
     fn on_debug_pause(&mut self, _: &DebugPause, _: &mut Window, cx: &mut Context<Self>) {
         self.send_debug(DebuggerCommand::Pause);
         cx.notify();
+    }
+    fn show_dock(&mut self, pane: DockPane, cx: &mut Context<Self>) {
+        self.dock = pane;
+        cx.notify();
+    }
+    fn on_show_files(&mut self, _: &ShowFiles, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_dock(DockPane::Files, cx);
+    }
+    fn on_show_debugger(&mut self, _: &ShowDebugger, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_dock(DockPane::Debugger, cx);
+    }
+    fn on_show_simulator(&mut self, _: &ShowSimulator, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_dock(DockPane::Simulator, cx);
+    }
+    fn on_show_components(&mut self, _: &ShowComponents, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_dock(DockPane::Components, cx);
+    }
+    fn on_show_profiler(&mut self, _: &ShowProfiler, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_dock(DockPane::Profiler, cx);
+    }
+    fn on_show_console(&mut self, _: &ShowConsole, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_dock(DockPane::Console, cx);
     }
 
     /// Drain pending events from the bridge and apply them to the window.
@@ -846,6 +928,198 @@ impl AtomioWindow {
     }
 }
 
+impl AtomioWindow {
+    /// Activity bar (left rail). Per `docs/design.md`: 48px wide, 36x36
+    /// items, accent left-edge indicator on active.
+    fn render_activity_bar(&self) -> gpui::Div {
+        let active = self.dock;
+        let items = [
+            DockPane::Files,
+            DockPane::Debugger,
+            DockPane::Simulator,
+            DockPane::Components,
+            DockPane::Profiler,
+            DockPane::Console,
+        ];
+        let mut bar = div()
+            .w(px(48.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .py_2()
+            .gap_1()
+            .bg(rgb(theme::BG_2))
+            .border_r_1()
+            .border_color(rgb(theme::LINE_1));
+        for pane in items {
+            let is_active = pane == active;
+            let (fg, bg) = if is_active {
+                (theme::ACCENT, theme::ACCENT_SOFT)
+            } else {
+                (theme::TX_3, theme::BG_2)
+            };
+            bar = bar.child(
+                div()
+                    .w(px(36.0))
+                    .h(px(36.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.0))
+                    .text_xs()
+                    .text_color(rgb(fg))
+                    .bg(rgb(bg))
+                    .child(pane.glyph()),
+            );
+        }
+        bar
+    }
+
+    /// Editor pane (centre). Same content as before; just extracted into
+    /// a method so the root render_layout reads cleanly.
+    fn render_editor_pane(
+        &self,
+        line_views: Vec<LineView>,
+        gutter_width: gpui::Pixels,
+    ) -> gpui::Div {
+        div()
+            .flex_1()
+            .py_4()
+            .flex()
+            .flex_col()
+            .text_color(rgb(theme::TX_1))
+            .children(line_views.into_iter().map(move |lv| {
+                let LineView {
+                    number,
+                    text,
+                    caret,
+                    selection,
+                    highlights,
+                } = lv;
+                let gutter = div()
+                    .w(gutter_width)
+                    .pr_2()
+                    .flex()
+                    .justify_end()
+                    .text_color(rgb(theme::TX_5))
+                    .child(format!("{number}"));
+                let runs = build_runs(&text, caret, selection, &highlights);
+                let mut row = div().flex().flex_row();
+                for run in runs {
+                    match run {
+                        Run::Caret => {
+                            row = row.child(div().w(px(2.0)).h(px(18.0)).bg(rgb(theme::ACCENT)));
+                        }
+                        Run::Text { text, fg, selected } => {
+                            if text.is_empty() {
+                                continue;
+                            }
+                            let bg = if selected {
+                                theme::ACCENT_SOFT
+                            } else {
+                                theme::BG_1
+                            };
+                            row = row.child(div().bg(rgb(bg)).text_color(rgb(fg)).child(text));
+                        }
+                    }
+                }
+                if text.is_empty() && caret.is_none() {
+                    row = row.child(div().child(" "));
+                }
+                div().flex().flex_row().child(gutter).child(row)
+            }))
+    }
+
+    /// Right dock. Renders the active pane; non-functional ones display
+    /// a placeholder pointing at the milestone where they'll land.
+    fn render_dock(&self) -> gpui::Div {
+        let pane = self.dock;
+        let header = div()
+            .px_3()
+            .py_1()
+            .text_xs()
+            .text_color(rgb(theme::TX_3))
+            .bg(rgb(theme::BG_0))
+            .border_b_1()
+            .border_color(rgb(theme::LINE_1))
+            .child(pane.label());
+
+        let body = match pane {
+            DockPane::Console => self.render_console_body(),
+            DockPane::Files => placeholder("File tree ships in v0.6"),
+            DockPane::Debugger => placeholder("Variables + call stack ship in v0.3"),
+            DockPane::Simulator => placeholder("Simulator pane ships in v0.5"),
+            DockPane::Components => placeholder("React component tree ships in v0.4"),
+            DockPane::Profiler => placeholder("Profiler ships in v0.5"),
+        };
+
+        div()
+            .w(px(360.0))
+            .flex()
+            .flex_col()
+            .bg(rgb(theme::BG_2))
+            .border_l_1()
+            .border_color(rgb(theme::LINE_1))
+            .child(header)
+            .child(body)
+    }
+
+    /// Console body (entries list). Used by [`render_dock`] when console
+    /// pane is active.
+    fn render_console_body(&self) -> gpui::Div {
+        let entries: Vec<_> = self
+            .console
+            .entries()
+            .iter()
+            .rev()
+            .take(200)
+            .cloned()
+            .collect();
+        let header = format!(
+            "{} entries · {} scripts loaded",
+            self.console.len(),
+            self.scripts.len()
+        );
+        let mut list = div().flex().flex_col().px_3().py_1().text_xs();
+        list = list.child(div().text_color(rgb(theme::TX_4)).pb_1().child(header));
+        if entries.is_empty() {
+            list = list.child(
+                div()
+                    .text_color(rgb(theme::TX_4))
+                    .child("(no entries — cmd+shift+d to connect)"),
+            );
+        } else {
+            for entry in entries.into_iter().rev() {
+                let tag_color = log_level_color(entry.level);
+                let row = div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(36.0))
+                            .text_color(rgb(tag_color))
+                            .child(entry.level.tag()),
+                    )
+                    .child(div().text_color(rgb(theme::TX_1)).child(entry.message));
+                list = list.child(row);
+            }
+        }
+        list
+    }
+}
+
+fn placeholder(label: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .flex_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_xs()
+        .text_color(rgb(theme::TX_4))
+        .child(label.into())
+}
+
 impl Focusable for AtomioWindow {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
         self.focus_handle.clone()
@@ -883,66 +1157,8 @@ impl Render for AtomioWindow {
             ConnectionState::Disconnected => theme::TX_4,
         };
 
-        // Build the console pane (conditionally). Each entry is rendered
-        // as a single row with a coloured level tag and the message text.
-        let console_pane: Option<gpui::Div> = if console_visible {
-            let entries: Vec<_> = self
-                .console
-                .entries()
-                .iter()
-                .rev()
-                .take(200)
-                .cloned()
-                .collect();
-            let mut pane = div()
-                .flex()
-                .flex_col()
-                .h(px(220.0))
-                .bg(rgb(theme::BG_2))
-                .border_t_1()
-                .border_color(rgb(theme::LINE_1))
-                .child(
-                    div()
-                        .px_3()
-                        .py_1()
-                        .text_xs()
-                        .text_color(rgb(theme::TX_3))
-                        .bg(rgb(theme::BG_0))
-                        .child(format!(
-                            "Console — {} entries · {} scripts loaded",
-                            self.console.len(),
-                            self.scripts.len()
-                        )),
-                );
-            let mut list = div().flex().flex_col().px_3().py_1().text_xs();
-            if entries.is_empty() {
-                list = list.child(
-                    div()
-                        .text_color(rgb(theme::TX_4))
-                        .child("(no entries — connect to a Metro target via cmd+shift+d)"),
-                );
-            } else {
-                for entry in entries.into_iter().rev() {
-                    let tag_color = log_level_color(entry.level);
-                    let row = div()
-                        .flex()
-                        .flex_row()
-                        .gap_2()
-                        .child(
-                            div()
-                                .w(px(36.0))
-                                .text_color(rgb(tag_color))
-                                .child(entry.level.tag()),
-                        )
-                        .child(div().text_color(rgb(theme::TX_1)).child(entry.message));
-                    list = list.child(row);
-                }
-            }
-            pane = pane.child(list);
-            Some(pane)
-        } else {
-            None
-        };
+        // Drop unused locals from earlier layout.
+        let _ = console_visible;
 
         // Build palette overlay if visible. Rendered as a Spotlight-style
         // floating panel: absolutely positioned, horizontally centred,
@@ -1047,83 +1263,51 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_debug_step_into))
             .on_action(cx.listener(Self::on_debug_step_out))
             .on_action(cx.listener(Self::on_debug_pause))
+            .on_action(cx.listener(Self::on_show_files))
+            .on_action(cx.listener(Self::on_show_debugger))
+            .on_action(cx.listener(Self::on_show_simulator))
+            .on_action(cx.listener(Self::on_show_components))
+            .on_action(cx.listener(Self::on_show_profiler))
+            .on_action(cx.listener(Self::on_show_console))
             .on_key_down(cx.listener(Self::on_key_down))
             .flex()
             .flex_col()
             .size_full()
             .bg(rgb(theme::BG_1))
             .text_color(rgb(theme::TX_1))
-            // Header
+            // Custom titlebar (system bar is transparent; traffic lights
+            // float at the configured position).
             .child(
                 div()
+                    .h(px(36.0))
                     .flex()
-                    .flex_col()
+                    .items_center()
+                    .justify_center()
                     .px_4()
-                    .py_2()
                     .bg(rgb(theme::BG_2))
                     .border_b_1()
                     .border_color(rgb(theme::LINE_1))
-                    .child(div().text_sm().text_color(rgb(theme::ACCENT)).child(title))
-                    .child(div().text_xs().text_color(rgb(theme::TX_3)).child(subtitle)),
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .items_center()
+                            .text_xs()
+                            .text_color(rgb(theme::TX_3))
+                            .child(div().child(title))
+                            .child(div().text_color(rgb(theme::TX_4)).child(subtitle)),
+                    ),
             )
-            // Buffer pane: gutter + text
+            // Main row: activity bar | editor | dock
             .child(
                 div()
                     .flex_1()
-                    .py_4()
                     .flex()
-                    .flex_col()
-                    .text_color(rgb(theme::TX_1))
-                    .children(line_views.into_iter().map(move |lv| {
-                        let LineView {
-                            number,
-                            text,
-                            caret,
-                            selection,
-                            highlights,
-                        } = lv;
-                        let gutter = div()
-                            .w(gutter_width)
-                            .pr_2()
-                            .flex()
-                            .justify_end()
-                            .text_color(rgb(theme::TX_5))
-                            .child(format!("{number}"));
-
-                        let runs = build_runs(&text, caret, selection, &highlights);
-                        let mut row = div().flex().flex_row();
-                        for run in runs {
-                            match run {
-                                Run::Caret => {
-                                    row = row
-                                        .child(div().w(px(2.0)).h(px(18.0)).bg(rgb(theme::ACCENT)));
-                                }
-                                Run::Text { text, fg, selected } => {
-                                    if text.is_empty() {
-                                        continue;
-                                    }
-                                    let bg = if selected {
-                                        theme::ACCENT_SOFT
-                                    } else {
-                                        theme::BG_1
-                                    };
-                                    row = row
-                                        .child(div().bg(rgb(bg)).text_color(rgb(fg)).child(text));
-                                }
-                            }
-                        }
-
-                        // Empty line still needs height — emit a blank space
-                        // so the row doesn't collapse.
-                        if text.is_empty() && caret.is_none() {
-                            row = row.child(div().child(" "));
-                        }
-
-                        div().flex().flex_row().child(gutter).child(row)
-                    })),
+                    .flex_row()
+                    .child(self.render_activity_bar())
+                    .child(self.render_editor_pane(line_views, gutter_width))
+                    .child(self.render_dock()),
             )
-            // Console pane (conditionally rendered).
-            .children(console_pane)
             // Footer / status line
             .child(
                 div()
@@ -1132,6 +1316,7 @@ impl Render for AtomioWindow {
                     .items_center()
                     .px_4()
                     .py_1()
+                    .h(px(22.0))
                     .bg(rgb(theme::BG_2))
                     .border_t_1()
                     .border_color(rgb(theme::LINE_1))
@@ -1345,13 +1530,27 @@ fn main() {
             KeyBinding::new("f11", DebugStepInto, Some("atomio")),
             KeyBinding::new("shift-f11", DebugStepOut, Some("atomio")),
             KeyBinding::new("f6", DebugPause, Some("atomio")),
+            KeyBinding::new("cmd-1", ShowFiles, Some("atomio")),
+            KeyBinding::new("cmd-2", ShowDebugger, Some("atomio")),
+            KeyBinding::new("cmd-3", ShowSimulator, Some("atomio")),
+            KeyBinding::new("cmd-4", ShowComponents, Some("atomio")),
+            KeyBinding::new("cmd-5", ShowProfiler, Some("atomio")),
+            KeyBinding::new("cmd-6", ShowConsole, Some("atomio")),
         ]);
 
-        let bounds = Bounds::centered(None, size(px(720.0), px(480.0)), cx);
+        let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
         let window = cx
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("atomio".into()),
+                        // Hide system titlebar so we draw our own 36px bar
+                        // with traffic lights still positioned over it.
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(14.0), px(12.0))),
+                    }),
+                    window_background: WindowBackgroundAppearance::Opaque,
                     ..Default::default()
                 },
                 |_window, cx| {
@@ -1374,6 +1573,7 @@ fn main() {
                         breakpoints: BreakpointRegistry::new(),
                         paused: false,
                         paused_frames: None,
+                        dock: DockPane::Console,
                     })
                 },
             )
