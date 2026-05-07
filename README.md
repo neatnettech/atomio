@@ -75,12 +75,14 @@ React Native debugging is fragmented. You bounce between Chrome DevTools, Flippe
 
 | Version | Theme | What ships |
 |---|---|---|
-| v0.0 | "It edits" | gpui window, code editor, syntax highlighting, command palette |
-| v0.1 | "It connects" | CDP client, Metro discovery, Hermes attach, console log stream |
-| v0.2 | "It debugs" | breakpoints, step controls, variable inspector, call stack |
-| v0.3 | "It inspects" | network inspector, React component tree, performance timeline |
-| v0.4 | "It flows" | file tree, fuzzy finder, multi-pane splits, integrated hot reload |
-| v1.0 | "Ship it" | polish, auto-update, documentation, stable CDP protocol surface |
+| v0.0 | "It edits" (DONE) | gpui window, code editor, syntax highlighting, command palette |
+| v0.1 | "It connects" (DONE) | CDP client, Metro discovery, Hermes attach, console log stream, bridge wiring for breakpoints + steps |
+| v0.2 | "It looks right" | window chrome, activity bar, dock scaffold, breakpoint gutter UI, step toolbar |
+| v0.3 | "It debugs" | variable inspector (Local/Closure/Global), call stack, inline values, conditional breakpoints |
+| v0.4 | "It inspects" | network inspector, React component tree, props/state |
+| v0.5 | "Simulator + profiler" | embedded simulator view, frame chart + flame graph |
+| v0.6 | "It flows" | file tree, fuzzy finder, splits, hot reload, project picker |
+| v1.0 | "Ship it" | source maps, polish, auto-update, signed DMG |
 
 Full roadmap: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
