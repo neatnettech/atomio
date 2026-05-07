@@ -2751,6 +2751,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "inspector"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "instant"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"

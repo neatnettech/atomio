@@ -6,6 +6,7 @@ members = [
     "crates/language",
     "crates/debugger",
     "crates/console",
+    "crates/inspector",
 ]
 
 [workspace.package]
@@ -20,4 +21,5 @@ editor_core = { path = "crates/editor_core" }
 language = { path = "crates/language" }
 debugger = { path = "crates/debugger" }
 console = { path = "crates/console" }
+inspector = { path = "crates/inspector" }
 ropey = "1.6"
