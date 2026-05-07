@@ -123,6 +123,10 @@ struct LineView {
     /// Syntax highlight runs on this line, in char-column space. Sorted and
     /// non-overlapping. Empty when the file has no recognised language.
     highlights: Vec<(usize, usize, HighlightKind)>,
+    /// True when a breakpoint is set on this line in the current source.
+    has_breakpoint: bool,
+    /// True when the runtime is paused on this exact line.
+    is_paused_here: bool,
 }
 
 /// Map a [`HighlightKind`] to an RGB foreground colour. This is where the
@@ -238,6 +242,9 @@ struct AtomioWindow {
     paused_frames: Option<serde_json::Value>,
     /// Currently active right-dock pane.
     dock: DockPane,
+    /// CDP source URL of the currently displayed buffer (when fetched from
+    /// Metro). Required to scope breakpoints + match paused locations.
+    current_url: Option<String>,
 }
 
 fn build_command_registry() -> CommandRegistry {
@@ -319,6 +326,19 @@ impl AtomioWindow {
             Vec::new()
         };
 
+        // Pre-compute per-line breakpoint set + paused-line for the
+        // current source URL. Lookups are linear over a tiny registry,
+        // fine for hundreds of breakpoints.
+        let bp_lines: std::collections::HashSet<u32> = match &self.current_url {
+            Some(url) => self
+                .breakpoints
+                .iter_for_url(url)
+                .map(|bp| bp.resolved_line)
+                .collect(),
+            None => Default::default(),
+        };
+        let paused_line = self.paused_line_in_current();
+
         (0..line_count)
             .map(|i| {
                 let text = buffer.line_text(i);
@@ -337,12 +357,15 @@ impl AtomioWindow {
                     None
                 };
                 let highlights = line_runs.get(i).cloned().unwrap_or_default();
+                let line_idx = i as u32;
                 LineView {
                     number: i + 1,
                     text,
                     caret,
                     selection,
                     highlights,
+                    has_breakpoint: bp_lines.contains(&line_idx),
+                    is_paused_here: paused_line == Some(line_idx),
                 }
             })
             .collect()
@@ -782,6 +805,54 @@ impl AtomioWindow {
         self.show_dock(DockPane::Console, cx);
     }
 
+    /// Toggle breakpoint at zero-based `line` for the currently displayed
+    /// source. Sends the corresponding CDP command via the bridge.
+    fn toggle_breakpoint_at(&mut self, line: u32, cx: &mut Context<Self>) {
+        use debugger::breakpoints::ToggleOutcome;
+        let Some(url) = self.current_url.clone() else {
+            self.status = "no source loaded — cmd+shift+o to fetch first script".into();
+            cx.notify();
+            return;
+        };
+        let outcome = self.breakpoints.toggle(&url, line);
+        match outcome {
+            ToggleOutcome::Added(local) => {
+                self.send_debug(DebuggerCommand::SetBreakpoint {
+                    local,
+                    url: url.clone(),
+                    line,
+                    column: None,
+                    condition: None,
+                });
+                self.status = format!("breakpoint set @ {url}:{line}").into();
+            }
+            ToggleOutcome::Removed { server_id, .. } => {
+                if let Some(sid) = server_id {
+                    self.send_debug(DebuggerCommand::RemoveBreakpoint { server_id: sid });
+                }
+                self.status = format!("breakpoint cleared @ {url}:{line}").into();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Zero-based line in the currently displayed source where the runtime
+    /// is paused, if any. Resolves `paused_frames[0].location.scriptId` to
+    /// its URL via the script registry and matches against `current_url`.
+    fn paused_line_in_current(&self) -> Option<u32> {
+        let frames = self.paused_frames.as_ref()?;
+        let frame = frames.as_array()?.first()?;
+        let loc = frame.get("location")?;
+        let script_id = loc.get("scriptId")?.as_str()?;
+        let line = loc.get("lineNumber")?.as_u64()? as u32;
+        let url = self.scripts.get(script_id).map(|s| s.url.clone())?;
+        if Some(&url) == self.current_url.as_ref() {
+            Some(line)
+        } else {
+            None
+        }
+    }
+
     /// Drain pending events from the bridge and apply them to the window.
     fn drain_bridge_events(&mut self, cx: &mut Context<Self>) {
         let Some(bridge) = &self.bridge else { return };
@@ -830,6 +901,7 @@ impl AtomioWindow {
                             self.state.set_read_only(true);
                             self.status =
                                 format!("loaded {url} ({} chars)", text.chars().count()).into();
+                            self.current_url = Some(url);
                         }
                         Err(e) => {
                             self.status = format!("fetch failed: {url}: {e}").into();
@@ -966,59 +1038,108 @@ impl AtomioWindow {
         bar
     }
 
-    /// Editor pane (centre). Same content as before; just extracted into
-    /// a method so the root render_layout reads cleanly.
+    /// Editor pane (centre). Builds the per-line layout: clickable gutter
+    /// (line number + breakpoint dot + paused arrow), then the syntax-coloured
+    /// text row, with a paused-line full-row tint when applicable.
     fn render_editor_pane(
         &self,
         line_views: Vec<LineView>,
         gutter_width: gpui::Pixels,
+        cx: &mut Context<Self>,
     ) -> gpui::Div {
-        div()
+        let mut pane = div()
             .flex_1()
             .py_4()
             .flex()
             .flex_col()
-            .text_color(rgb(theme::TX_1))
-            .children(line_views.into_iter().map(move |lv| {
-                let LineView {
-                    number,
-                    text,
-                    caret,
-                    selection,
-                    highlights,
-                } = lv;
-                let gutter = div()
-                    .w(gutter_width)
-                    .pr_2()
-                    .flex()
-                    .justify_end()
-                    .text_color(rgb(theme::TX_5))
-                    .child(format!("{number}"));
-                let runs = build_runs(&text, caret, selection, &highlights);
-                let mut row = div().flex().flex_row();
-                for run in runs {
-                    match run {
-                        Run::Caret => {
-                            row = row.child(div().w(px(2.0)).h(px(18.0)).bg(rgb(theme::ACCENT)));
+            .text_color(rgb(theme::TX_1));
+        for lv in line_views {
+            let LineView {
+                number,
+                text,
+                caret,
+                selection,
+                highlights,
+                has_breakpoint,
+                is_paused_here,
+            } = lv;
+            // Zero-based CDP line index for click + paused dispatch.
+            let line_idx = (number - 1) as u32;
+
+            // Gutter cell: line number + bp dot + paused arrow. Clickable
+            // anywhere on the gutter: toggles the breakpoint via the
+            // bridge.
+            let bp_indicator = if has_breakpoint {
+                div()
+                    .w(px(8.0))
+                    .h(px(8.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(theme::ACCENT))
+            } else {
+                div().w(px(8.0)).h(px(8.0))
+            };
+            let arrow = if is_paused_here { "▶" } else { " " };
+            let gutter = div()
+                .id(SharedString::from(format!("gutter-{line_idx}")))
+                .w(gutter_width)
+                .pr_2()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .text_color(rgb(theme::TX_5))
+                .child(div().w(px(8.0)).child(arrow))
+                .child(bp_indicator)
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .justify_end()
+                        .child(format!("{number}")),
+                )
+                .on_click(cx.listener(move |this, _ev, _win, cx| {
+                    this.toggle_breakpoint_at(line_idx, cx);
+                }));
+
+            let runs = build_runs(&text, caret, selection, &highlights);
+            let mut row = div().flex().flex_row();
+            for run in runs {
+                match run {
+                    Run::Caret => {
+                        row = row.child(div().w(px(2.0)).h(px(18.0)).bg(rgb(theme::ACCENT)));
+                    }
+                    Run::Text { text, fg, selected } => {
+                        if text.is_empty() {
+                            continue;
                         }
-                        Run::Text { text, fg, selected } => {
-                            if text.is_empty() {
-                                continue;
-                            }
-                            let bg = if selected {
-                                theme::ACCENT_SOFT
-                            } else {
-                                theme::BG_1
-                            };
-                            row = row.child(div().bg(rgb(bg)).text_color(rgb(fg)).child(text));
-                        }
+                        let bg = if selected || is_paused_here {
+                            theme::ACCENT_SOFT
+                        } else {
+                            theme::BG_1
+                        };
+                        row = row.child(div().bg(rgb(bg)).text_color(rgb(fg)).child(text));
                     }
                 }
-                if text.is_empty() && caret.is_none() {
-                    row = row.child(div().child(" "));
-                }
-                div().flex().flex_row().child(gutter).child(row)
-            }))
+            }
+            if text.is_empty() && caret.is_none() {
+                row = row.child(div().child(" "));
+            }
+
+            let row_bg = if is_paused_here {
+                theme::ACCENT_SOFT
+            } else {
+                theme::BG_1
+            };
+            pane = pane.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .bg(rgb(row_bg))
+                    .child(gutter)
+                    .child(row),
+            );
+        }
+        pane
     }
 
     /// Right dock. Renders the active pane; non-functional ones display
@@ -1291,7 +1412,7 @@ impl Render for AtomioWindow {
                     .flex()
                     .flex_row()
                     .child(self.render_activity_bar())
-                    .child(self.render_editor_pane(line_views, gutter_width))
+                    .child(self.render_editor_pane(line_views, gutter_width, cx))
                     .child(self.render_dock()),
             )
             // Footer / status line
@@ -1557,6 +1678,7 @@ fn main() {
                         paused: false,
                         paused_frames: None,
                         dock: DockPane::Console,
+                        current_url: None,
                     })
                 },
             )
