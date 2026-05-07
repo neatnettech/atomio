@@ -1144,7 +1144,7 @@ impl AtomioWindow {
 
     /// Right dock. Renders the active pane; non-functional ones display
     /// a placeholder pointing at the milestone where they'll land.
-    fn render_dock(&self) -> gpui::Div {
+    fn render_dock(&self, cx: &mut Context<Self>) -> gpui::Div {
         let pane = self.dock;
         let header = div()
             .px_3()
@@ -1159,7 +1159,7 @@ impl AtomioWindow {
         let body = match pane {
             DockPane::Console => self.render_console_body(),
             DockPane::Files => placeholder("File tree ships in v0.6"),
-            DockPane::Debugger => placeholder("Variables + call stack ship in v0.3"),
+            DockPane::Debugger => self.render_debugger_body(cx),
             DockPane::Simulator => placeholder("Simulator pane ships in v0.5"),
             DockPane::Components => placeholder("React component tree ships in v0.4"),
             DockPane::Profiler => placeholder("Profiler ships in v0.5"),
@@ -1174,6 +1174,121 @@ impl AtomioWindow {
             .border_color(rgb(theme::LINE_1))
             .child(header)
             .child(body)
+    }
+
+    /// Debugger pane body. v0.2 ships the step-control bar; variables +
+    /// call stack land in v0.3.
+    fn render_debugger_body(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let connected = matches!(self.connection, ConnectionState::Connected { .. });
+        let paused = self.paused;
+
+        let bar = div()
+            .flex()
+            .flex_row()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(rgb(theme::LINE_1))
+            .child(
+                self.step_button("Resume", "▶", "F5", connected && paused, cx, |cmd| {
+                    *cmd = Some(DebuggerCommand::Resume)
+                }),
+            )
+            .child(
+                self.step_button("Step Over", "↷", "F10", connected && paused, cx, |cmd| {
+                    *cmd = Some(DebuggerCommand::StepOver)
+                }),
+            )
+            .child(
+                self.step_button("Step Into", "↳", "F11", connected && paused, cx, |cmd| {
+                    *cmd = Some(DebuggerCommand::StepInto)
+                }),
+            )
+            .child(
+                self.step_button("Step Out", "↰", "⇧F11", connected && paused, cx, |cmd| {
+                    *cmd = Some(DebuggerCommand::StepOut)
+                }),
+            )
+            .child(
+                self.step_button("Pause", "⏸", "F6", connected && !paused, cx, |cmd| {
+                    *cmd = Some(DebuggerCommand::Pause)
+                }),
+            );
+
+        let state_line = div()
+            .px_3()
+            .py_2()
+            .text_xs()
+            .text_color(rgb(if paused { theme::ACCENT } else { theme::TX_4 }))
+            .child(if !connected {
+                "(not connected)".to_string()
+            } else if paused {
+                "● paused".to_string()
+            } else {
+                "● running".to_string()
+            });
+
+        let placeholder_body = div()
+            .flex_1()
+            .px_3()
+            .py_4()
+            .text_xs()
+            .text_color(rgb(theme::TX_4))
+            .child("Variables, call stack, and watch expressions ship in v0.3.");
+
+        div()
+            .flex()
+            .flex_col()
+            .child(bar)
+            .child(state_line)
+            .child(placeholder_body)
+    }
+
+    /// Build one step-control button. Disabled-looking when `enabled` is
+    /// false; click only fires the command when enabled.
+    fn step_button(
+        &self,
+        label: &'static str,
+        glyph: &'static str,
+        shortcut: &'static str,
+        enabled: bool,
+        cx: &mut Context<Self>,
+        pick: impl Fn(&mut Option<DebuggerCommand>) + 'static,
+    ) -> gpui::Div {
+        let (fg, bg) = if enabled {
+            (theme::TX_1, theme::BG_3)
+        } else {
+            (theme::TX_5, theme::BG_2)
+        };
+        let inner = div()
+            .id(SharedString::from(format!("step-{label}")))
+            .w(px(58.0))
+            .px_2()
+            .py_1()
+            .rounded(px(4.0))
+            .bg(rgb(bg))
+            .text_color(rgb(fg))
+            .text_xs()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1()
+            .child(div().child(glyph))
+            .child(div().text_color(rgb(theme::TX_4)).child(shortcut))
+            .on_click(cx.listener(move |this, _ev, _win, cx| {
+                if !enabled {
+                    return;
+                }
+                let mut slot: Option<DebuggerCommand> = None;
+                pick(&mut slot);
+                if let Some(cmd) = slot {
+                    this.send_debug(cmd);
+                    cx.notify();
+                }
+            }));
+        // Wrap Stateful<Div> in plain Div so callers can compose normally.
+        div().child(inner)
     }
 
     /// Console body (entries list). Used by [`render_dock`] when console
@@ -1413,7 +1528,7 @@ impl Render for AtomioWindow {
                     .flex_row()
                     .child(self.render_activity_bar())
                     .child(self.render_editor_pane(line_views, gutter_width, cx))
-                    .child(self.render_dock()),
+                    .child(self.render_dock(cx)),
             )
             // Footer / status line
             .child(
