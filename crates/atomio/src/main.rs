@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use cdp_bridge::{ConnectionState, DebuggerBridge, DebuggerCommand, DebuggerEvent};
 use console::Console;
+use debugger::breakpoints::BreakpointRegistry;
 use debugger::scripts::ScriptRegistry;
 use editor_core::{Buffer, CommandRegistry, EditorState};
 use gpui::{
@@ -60,6 +61,11 @@ actions!(
         ClearConsole,
         OpenFirstScript,
         OpenLogFile,
+        DebugResume,
+        DebugStepOver,
+        DebugStepInto,
+        DebugStepOut,
+        DebugPause,
     ]
 );
 
@@ -180,6 +186,13 @@ struct AtomioWindow {
     bridge: Option<DebuggerBridge>,
     /// Scripts the runtime has reported via `Debugger.scriptParsed`.
     scripts: ScriptRegistry,
+    /// Breakpoints set in the current debug session.
+    breakpoints: BreakpointRegistry,
+    /// True when runtime is paused at a breakpoint or step.
+    paused: bool,
+    /// Last paused-frames payload (raw CDP `callFrames`). Decoded on demand
+    /// when rendering the call stack.
+    paused_frames: Option<serde_json::Value>,
 }
 
 fn build_command_registry() -> CommandRegistry {
@@ -199,6 +212,11 @@ fn build_command_registry() -> CommandRegistry {
     reg.register("Debug: Clear Console", "clear_console");
     reg.register("Debug: Open First Script", "open_first_script");
     reg.register("Debug: Open Log File", "open_log_file");
+    reg.register("Debug: Resume (F5)", "debug_resume");
+    reg.register("Debug: Step Over (F10)", "debug_step_over");
+    reg.register("Debug: Step Into (F11)", "debug_step_into");
+    reg.register("Debug: Step Out (Shift+F11)", "debug_step_out");
+    reg.register("Debug: Pause", "debug_pause");
     reg
 }
 
@@ -593,6 +611,11 @@ impl AtomioWindow {
             "clear_console" => self.on_clear_console(&ClearConsole, window, cx),
             "open_first_script" => self.on_open_first_script(&OpenFirstScript, window, cx),
             "open_log_file" => self.on_open_log_file(&OpenLogFile, window, cx),
+            "debug_resume" => self.on_debug_resume(&DebugResume, window, cx),
+            "debug_step_over" => self.on_debug_step_over(&DebugStepOver, window, cx),
+            "debug_step_into" => self.on_debug_step_into(&DebugStepInto, window, cx),
+            "debug_step_out" => self.on_debug_step_out(&DebugStepOut, window, cx),
+            "debug_pause" => self.on_debug_pause(&DebugPause, window, cx),
             _ => {}
         }
     }
@@ -653,6 +676,36 @@ impl AtomioWindow {
         if let Some(bridge) = &self.bridge {
             let _ = bridge.commands.send(DebuggerCommand::Disconnect);
         }
+        self.breakpoints.clear();
+        self.paused = false;
+        self.paused_frames = None;
+        cx.notify();
+    }
+
+    fn send_debug(&self, cmd: DebuggerCommand) {
+        if let Some(bridge) = &self.bridge {
+            let _ = bridge.commands.send(cmd);
+        }
+    }
+
+    fn on_debug_resume(&mut self, _: &DebugResume, _: &mut Window, cx: &mut Context<Self>) {
+        self.send_debug(DebuggerCommand::Resume);
+        cx.notify();
+    }
+    fn on_debug_step_over(&mut self, _: &DebugStepOver, _: &mut Window, cx: &mut Context<Self>) {
+        self.send_debug(DebuggerCommand::StepOver);
+        cx.notify();
+    }
+    fn on_debug_step_into(&mut self, _: &DebugStepInto, _: &mut Window, cx: &mut Context<Self>) {
+        self.send_debug(DebuggerCommand::StepInto);
+        cx.notify();
+    }
+    fn on_debug_step_out(&mut self, _: &DebugStepOut, _: &mut Window, cx: &mut Context<Self>) {
+        self.send_debug(DebuggerCommand::StepOut);
+        cx.notify();
+    }
+    fn on_debug_pause(&mut self, _: &DebugPause, _: &mut Window, cx: &mut Context<Self>) {
+        self.send_debug(DebuggerCommand::Pause);
         cx.notify();
     }
 
@@ -709,6 +762,41 @@ impl AtomioWindow {
                             self.status = format!("fetch failed: {url}: {e}").into();
                         }
                     }
+                    changed = true;
+                }
+                DebuggerEvent::BreakpointSet {
+                    local,
+                    server_id,
+                    line,
+                } => {
+                    self.breakpoints.attach_server_id(local, &server_id);
+                    if let Some(line) = line {
+                        self.breakpoints.set_resolved_line(local, line);
+                    }
+                    self.status =
+                        format!("breakpoint set: {} (server {})", server_id, server_id).into();
+                    changed = true;
+                }
+                DebuggerEvent::BreakpointResolved { server_id, line } => {
+                    if let Some(local_id) = self
+                        .breakpoints
+                        .find_by_server_id(&server_id)
+                        .map(|bp| bp.id)
+                    {
+                        self.breakpoints.set_resolved_line(local_id, line);
+                    }
+                    changed = true;
+                }
+                DebuggerEvent::Paused { reason, frames } => {
+                    self.paused = true;
+                    self.paused_frames = Some(frames);
+                    self.status = format!("paused ({reason})").into();
+                    changed = true;
+                }
+                DebuggerEvent::Resumed => {
+                    self.paused = false;
+                    self.paused_frames = None;
+                    self.status = "resumed".into();
                     changed = true;
                 }
             }
@@ -954,6 +1042,11 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_open_log_file))
             .on_action(cx.listener(Self::on_connect))
             .on_action(cx.listener(Self::on_disconnect))
+            .on_action(cx.listener(Self::on_debug_resume))
+            .on_action(cx.listener(Self::on_debug_step_over))
+            .on_action(cx.listener(Self::on_debug_step_into))
+            .on_action(cx.listener(Self::on_debug_step_out))
+            .on_action(cx.listener(Self::on_debug_pause))
             .on_key_down(cx.listener(Self::on_key_down))
             .flex()
             .flex_col()
@@ -1247,6 +1340,11 @@ fn main() {
             KeyBinding::new("cmd-shift-c", ToggleConsole, Some("atomio")),
             KeyBinding::new("cmd-k", ClearConsole, Some("atomio")),
             KeyBinding::new("cmd-shift-o", OpenFirstScript, Some("atomio")),
+            KeyBinding::new("f5", DebugResume, Some("atomio")),
+            KeyBinding::new("f10", DebugStepOver, Some("atomio")),
+            KeyBinding::new("f11", DebugStepInto, Some("atomio")),
+            KeyBinding::new("shift-f11", DebugStepOut, Some("atomio")),
+            KeyBinding::new("f6", DebugPause, Some("atomio")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(720.0), px(480.0)), cx);
@@ -1273,6 +1371,9 @@ fn main() {
                         connection: ConnectionState::Disconnected,
                         bridge: Some(bridge),
                         scripts: ScriptRegistry::new(),
+                        breakpoints: BreakpointRegistry::new(),
+                        paused: false,
+                        paused_frames: None,
                     })
                 },
             )
