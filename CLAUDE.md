@@ -8,7 +8,9 @@ Context for Claude Code working in this repository. Read this first.
 
 macOS / Apple Silicon only through v1.0. MIT, no CLA. See `README.md` for the pitch and `docs/ROADMAP.md` for the milestone breakdown.
 
-**Current state:** v0.0 is done. The code editor works (buffer, selection, undo/redo, clipboard, syntax highlighting, command palette). v0.1 ("It connects") is the active focus: CDP client, Metro discovery, Hermes attach, console log stream.
+**Current state:** v0.0 + v0.1 done. Editor works (buffer, selection, undo/redo, clipboard, syntax highlighting for Rust/TS/TSX/JS/JSON, command palette). Debugger pipeline connects to Metro+Hermes, streams console logs, parses scripts, fetches sources read-only, and the bridge wiring for breakpoints + step controls is in place (palette: Debug: Resume / Step Over / Step Into / Step Out / Pause; F5/F10/F11/Shift+F11/F6).
+
+**Active focus: v0.2 "It looks right"** -- design-system rollout (window chrome, activity bar, right-dock scaffold per `docs/design.md`) + breakpoint gutter UI + step toolbar. Roadmap was reprioritized 2026-05-06: variables/call stack moved to v0.3, network/react to v0.4, simulator+profiler to v0.5, file tree to v0.6, source maps to v1.0.
 
 ## Repo layout
 
