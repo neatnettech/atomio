@@ -136,7 +136,11 @@ All bound via `actions!` + `KeyBinding::new` in the `atomio` key context.
 
 ## Visual design
 
-The visual target lives in [`docs/design.md`](docs/design.md), backed by an interactive HTML mock at [`docs/design/handoff/project/atomio.html`](docs/design/handoff/project/atomio.html). When implementing UI, **match the prototype**: same colors, spacing, typography, layout. Map CSS tokens to constants in code, never sprinkle hex literals.
+The visual target lives in [`docs/design.md`](docs/design.md), backed by two interactive HTML mocks:
+- App layout / panes / tokens: [`docs/design/handoff/project/atomio.html`](docs/design/handoff/project/atomio.html)
+- Brand (icons + hero + social): [`docs/design/brand-handoff/project/brand.html`](docs/design/brand-handoff/project/brand.html)
+
+When implementing UI, **match the prototype**: same colors, spacing, typography, layout. Map CSS tokens to constants in code, never sprinkle hex literals. Default app icon direction: 01 Orbits (see brand handoff).
 
 ## Useful pointers
 

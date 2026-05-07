@@ -239,9 +239,77 @@ The handoff bundle's JSX is reference, not source -- don't import or run it. Rea
 
 ---
 
+## Brand
+
+The brand handoff lives at [`docs/design/brand-handoff/`](design/brand-handoff/). Open `project/brand.html` in any browser to view six app-icon directions, the GitHub repo hero, and the social card.
+
+### Tagline
+
+> **React Native & Expo / debugging that gets / out of your way.**
+
+Subhead (long): *"Editor, breakpoints, simulator, profiler -- one window. Built native for macOS."*
+
+Subhead (short, social card): *"The React Native & Expo debugger for Mac."*
+
+### App icon directions
+
+Six SVGs at 1024x1024 (export-ready). Each lives in `brand.jsx`:
+
+| ID | Name | Vibe |
+|----|------|------|
+| 01 | Orbits (signature) | Three accent ellipses around a green nucleus, two electron dots. Default direction. |
+| 02 | Brackets | Heavy `{ }` glyph with red breakpoint dot top-left + accent run dot bottom-right. |
+| 03 | Lowercase a | Big `a` on accent green gradient with breakpoint pin punctuation. |
+| 04 | Window + phone | Literal: macOS window chrome containing an iPhone mock with checkout list. |
+| 05 | Pulse | EKG waveform across the icon with a breakpoint marker on the peak. |
+| 06 | Caret monogram | Tilted accent slash + small "ai" hint. |
+
+**Default pick: 01 Orbits.** It's already used as the wordmark mark in the GitHub hero. The lowercase `a` (03) is the alternate when a green-forward presence is wanted.
+
+### macOS app icon export pipeline
+
+When ready to ship the `.app` bundle:
+
+1. Render `IconOrbits` from `brand.jsx` into an SVG file at 1024x1024.
+2. Convert to PNG ladder via `iconutil` -- need 1024, 512@2x, 512, 256@2x, 256, 128@2x, 128, 64@2x, 32@2x, 32, 16@2x, 16.
+3. Build `.iconset` directory and run `iconutil -c icns atomio.iconset` to produce `atomio.icns`.
+4. Reference from `Info.plist` in the release bundle. Wired into `release.yml` once codesign step lands.
+
+Until then, the SVG source is the canonical artwork. Keep all icon variants in the brand handoff so the alternates stay accessible.
+
+### GitHub repo hero (1280x640)
+
+Top-of-README banner. Layout in `brand.jsx::GitHubHero`:
+
+- Left column: orbits mark + wordmark, version + license + macOS chip, three-line headline, two-line subhead, primary "Download for Mac" CTA + secondary "Star on GitHub", `brew install --cask atomio` line.
+- Right column: 3/4-perspective skewed window mock with cart.tsx code, gutter breakpoint dot, paused-line highlight + inline value pill, console pane with realistic log mix, floating phone overlay showing the cart screen with live indicator.
+- Footer: six feature chips (Editor / Breakpoints / iOS Simulator / Profiler / Component Tree / cmd-K Palette).
+
+### Social card (1280x640)
+
+Centered orbit mark + wordmark on a quieter pulse background. Concentric orbit rings at 18% opacity. Used for OpenGraph + repo social preview.
+
+### Brand colour palette
+
+Mirrors the app theme tokens (see surfaces / brand & semantic above). Hero/social use BG_0 + BG_1 with ACCENT and the same syntax palette in mock code.
+
+---
+
 ## Provenance
 
-- Designed in Claude Design (`claude.ai/design`) on 2026-05-06 by Piotr Pestka.
-- Bundle imported via API: `https://api.anthropic.com/v1/design/h/psfRkSUeZwSq3tschyeeag`.
-- Original chat transcript: [`docs/design/handoff/chats/chat1.md`](design/handoff/chats/chat1.md).
-- This spec is the **target**, not the current state. As implementation lands, link PRs that bring atomio closer to it.
+### App design (panes, tokens, layout)
+
+- Designed in Claude Design on 2026-05-06.
+- Bundle: `https://api.anthropic.com/v1/design/h/psfRkSUeZwSq3tschyeeag`
+- Local: [`docs/design/handoff/`](design/handoff/) -- open `project/atomio.html`
+- Chat: [`docs/design/handoff/chats/chat1.md`](design/handoff/chats/chat1.md)
+
+### Brand (icons, hero, social)
+
+- Designed in Claude Design on 2026-05-06.
+- Bundle: `https://api.anthropic.com/v1/design/h/PMh4wNaoM_GrFwzjm0EMkg`
+- Local: [`docs/design/brand-handoff/`](design/brand-handoff/) -- open `project/brand.html`
+- Chat: [`docs/design/brand-handoff/chats/chat1.md`](design/brand-handoff/chats/chat1.md)
+
+This spec is the **target**, not the current state. As implementation lands, link PRs that bring atomio closer to it.
+
