@@ -9,17 +9,30 @@
 //!
 //! No async leaks into the UI module beyond the polling loop.
 
+use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 
 use console::{entry_from_console_api_called, LogLevel, SourceLocation};
-use debugger::cdp::{debugger_enable, runtime_enable, CdpMessage};
+use debugger::breakpoints::BreakpointId;
+use debugger::cdp::{
+    debugger_enable, debugger_pause, debugger_resume, debugger_step_into, debugger_step_out,
+    debugger_step_over, remove_breakpoint, runtime_enable, set_breakpoint_by_url, CdpMessage,
+};
 use debugger::metro::{fetch_source, scan_localhost};
 use debugger::scripts::Script;
 use debugger::transport::CdpTransport;
+use serde_json::Value;
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 /// Commands the UI sends to the worker thread.
+///
+/// `SetBreakpoint` / `RemoveBreakpoint` aren't dispatched from the UI yet
+/// (gutter UI ships in a follow-up PR) but the wire is in place so the
+/// follow-up is purely UI-side.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum DebuggerCommand {
     /// Scan localhost, pick the first target, connect, enable Runtime + Debugger.
@@ -29,7 +42,29 @@ pub enum DebuggerCommand {
     /// Fetch a source resource by URL and emit it back as
     /// [`DebuggerEvent::SourceFetched`]. Used to load script bodies and
     /// `.map` files referenced by `Debugger.scriptParsed`.
-    FetchSource { url: String },
+    FetchSource {
+        url: String,
+    },
+    /// Set a breakpoint by source URL and line. Worker sends
+    /// `Debugger.setBreakpointByUrl`; on response the registry is updated
+    /// via [`DebuggerEvent::BreakpointSet`] carrying the matching local id.
+    SetBreakpoint {
+        local: BreakpointId,
+        url: String,
+        line: u32,
+        column: Option<u32>,
+        condition: Option<String>,
+    },
+    /// Remove a breakpoint by its server-assigned id.
+    RemoveBreakpoint {
+        server_id: String,
+    },
+    /// Step controls -- map directly to CDP `Debugger.*` methods.
+    Resume,
+    StepOver,
+    StepInto,
+    StepOut,
+    Pause,
 }
 
 /// Events the worker thread pushes back to the UI.
@@ -50,6 +85,20 @@ pub enum DebuggerEvent {
         url: String,
         body: Result<String, String>,
     },
+    /// `Debugger.setBreakpointByUrl` response received. Carries the local
+    /// id we issued the request with so the UI can attach the server id.
+    BreakpointSet {
+        local: BreakpointId,
+        server_id: String,
+        line: Option<u32>,
+    },
+    /// `Debugger.breakpointResolved` event -- runtime relocated breakpoint.
+    BreakpointResolved { server_id: String, line: u32 },
+    /// `Debugger.paused` -- runtime hit a breakpoint or stepped. `frames`
+    /// is the raw call-frame array; deeper decoding happens upstream.
+    Paused { reason: String, frames: Value },
+    /// `Debugger.resumed` -- execution continued.
+    Resumed,
 }
 
 /// Coarse connection state. Detailed CDP state lives in the worker.
@@ -98,17 +147,20 @@ pub fn spawn() -> DebuggerBridge {
     }
 }
 
+/// Pending CDP request id → local breakpoint id awaiting response.
+/// Populated when we send `Debugger.setBreakpointByUrl`; drained when the
+/// matching response arrives in the event forwarder.
+type PendingBreakpoints = Arc<Mutex<HashMap<u64, BreakpointId>>>;
+
 /// The worker's async main loop. One outstanding CDP connection at a time.
-#[allow(unused_assignments, unused_variables)]
 async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerEvent>) {
-    // The transport is held here purely to keep the WebSocket open; reading
-    // it isn't necessary because messages flow through the broadcast
-    // channel that the read loop owns. We assign and drop it deliberately.
-    let mut current: Option<CdpTransport> = None;
+    // Transport held in Arc so command handlers and the event forwarder can
+    // both reach it. `None` until Connect succeeds; cleared on Disconnect.
+    let transport: Arc<Mutex<Option<Arc<CdpTransport>>>> = Arc::new(Mutex::new(None));
+    let pending: PendingBreakpoints = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
-        // Block on a command. Commands come from the UI thread over a
-        // sync channel; treat closure as shutdown.
+        // Block on a command from the UI. Channel close = shutdown.
         let cmd = match cmd_rx.recv() {
             Ok(c) => c,
             Err(_) => return,
@@ -117,7 +169,8 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
         match cmd {
             DebuggerCommand::Disconnect => {
                 info!(target: "atomio::bridge", "disconnect requested");
-                current = None;
+                *transport.lock().await = None;
+                pending.lock().await.clear();
                 let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Disconnected));
             }
             DebuggerCommand::FetchSource { url } => {
@@ -129,108 +182,278 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                 });
             }
             DebuggerCommand::Connect => {
-                info!(target: "atomio::bridge", "connect requested");
-                let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Scanning));
-                let targets = scan_localhost().await;
-                if targets.is_empty() {
-                    let reason = "no Metro targets found on localhost (is `expo start` running with a sim/device booted?)".to_string();
-                    warn!(target: "atomio::bridge", "{}", reason);
-                    let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Failed { reason }));
-                    continue;
-                }
-                // Log all candidates so users can see what was advertised.
-                for (base, t) in &targets {
-                    info!(
-                        target: "atomio::bridge",
-                        base = %base,
-                        id = %t.id,
-                        title = %t.title,
-                        desc = %t.description,
-                        "candidate target"
-                    );
-                }
-                // Pick first user app target. Skip `host.exp.Exponent`
-                // (Expo Go shell — no user JS) and `UI` connections (native
-                // view tree; user JS lives in the Bridgeless connection).
-                // Fallback to the first target if our heuristic finds none.
-                let pick = targets
-                    .iter()
-                    .find(|(_, t)| {
-                        !t.title.starts_with("host.exp.Exponent") && !t.description.contains("UI [")
-                    })
-                    .or_else(|| targets.first())
-                    .cloned();
-                let Some((_, target)) = pick else {
-                    let reason = "target list non-empty but selection failed".to_string();
-                    warn!(target: "atomio::bridge", "{}", reason);
-                    let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Failed { reason }));
+                connect(&transport, &pending, &evt_tx).await;
+            }
+            DebuggerCommand::SetBreakpoint {
+                local,
+                url,
+                line,
+                column,
+                condition: _condition,
+            } => {
+                let Some(t) = transport.lock().await.clone() else {
+                    warn!(target: "atomio::bridge", "set breakpoint while disconnected");
                     continue;
                 };
-                let ws_url = target.web_socket_debugger_url.clone();
-                info!(
+                let req = set_breakpoint_by_url(&url, line, column);
+                let req_id = req.id;
+                debug!(
                     target: "atomio::bridge",
-                    target_id = %target.id,
-                    title = %target.title,
-                    ws_url = %ws_url,
-                    "picked target"
+                    local = ?local,
+                    req_id,
+                    url = %url,
+                    line,
+                    "-> setBreakpointByUrl"
                 );
-                let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Connecting {
-                    ws_url: ws_url.clone(),
-                }));
-
-                let transport = match CdpTransport::connect(&ws_url).await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        warn!(target: "atomio::bridge", error = %e, "transport connect failed");
-                        let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Failed {
-                            reason: e.to_string(),
-                        }));
-                        continue;
-                    }
+                pending.lock().await.insert(req_id, local);
+                if let Err(e) = t.send(&req).await {
+                    warn!(target: "atomio::bridge", error = %e, "send setBreakpointByUrl failed");
+                    pending.lock().await.remove(&req_id);
+                }
+            }
+            DebuggerCommand::RemoveBreakpoint { server_id } => {
+                let Some(t) = transport.lock().await.clone() else {
+                    continue;
                 };
+                debug!(target: "atomio::bridge", server_id = %server_id, "-> removeBreakpoint");
+                let _ = t.send(&remove_breakpoint(&server_id)).await;
+            }
+            DebuggerCommand::Resume => send_no_args(&transport, debugger_resume(), "resume").await,
+            DebuggerCommand::StepOver => {
+                send_no_args(&transport, debugger_step_over(), "stepOver").await
+            }
+            DebuggerCommand::StepInto => {
+                send_no_args(&transport, debugger_step_into(), "stepInto").await
+            }
+            DebuggerCommand::StepOut => {
+                send_no_args(&transport, debugger_step_out(), "stepOut").await
+            }
+            DebuggerCommand::Pause => send_no_args(&transport, debugger_pause(), "pause").await,
+        }
+    }
+}
 
-                // Enable the domains we care about. Errors are non-fatal:
-                // the transport may still receive events even if one
-                // request fails.
-                let _ = transport.send(&runtime_enable()).await;
-                let _ = transport.send(&debugger_enable()).await;
+/// Helper for fire-and-forget step/pause/resume requests.
+async fn send_no_args(
+    transport: &Arc<Mutex<Option<Arc<CdpTransport>>>>,
+    request: debugger::cdp::CdpRequest,
+    label: &str,
+) {
+    let Some(t) = transport.lock().await.clone() else {
+        warn!(target: "atomio::bridge", label, "send while disconnected");
+        return;
+    };
+    debug!(target: "atomio::bridge", label, "-> step/control");
+    let _ = t.send(&request).await;
+}
 
-                let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Connected {
-                    ws_url: ws_url.clone(),
-                }));
+/// Establish a CDP connection and spawn the event forwarder.
+async fn connect(
+    transport_slot: &Arc<Mutex<Option<Arc<CdpTransport>>>>,
+    pending: &PendingBreakpoints,
+    evt_tx: &Sender<DebuggerEvent>,
+) {
+    info!(target: "atomio::bridge", "connect requested");
+    let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Scanning));
+    let targets = scan_localhost().await;
+    if targets.is_empty() {
+        let reason = "no Metro targets found on localhost (is `expo start` running with a sim/device booted?)".to_string();
+        warn!(target: "atomio::bridge", "{}", reason);
+        let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Failed { reason }));
+        return;
+    }
+    for (base, t) in &targets {
+        info!(
+            target: "atomio::bridge",
+            base = %base,
+            id = %t.id,
+            title = %t.title,
+            desc = %t.description,
+            "candidate target"
+        );
+    }
+    let pick = targets
+        .iter()
+        .find(|(_, t)| !t.title.starts_with("host.exp.Exponent") && !t.description.contains("UI ["))
+        .or_else(|| targets.first())
+        .cloned();
+    let Some((_, target)) = pick else {
+        let reason = "target list non-empty but selection failed".to_string();
+        warn!(target: "atomio::bridge", "{}", reason);
+        let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Failed { reason }));
+        return;
+    };
+    let ws_url = target.web_socket_debugger_url.clone();
+    info!(
+        target: "atomio::bridge",
+        target_id = %target.id,
+        title = %target.title,
+        ws_url = %ws_url,
+        "picked target"
+    );
+    let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Connecting {
+        ws_url: ws_url.clone(),
+    }));
 
-                // Subscribe and forward log + script events. Spawned as a
-                // background task so the worker can keep polling commands.
-                let mut events = transport.subscribe();
-                let evt_tx = evt_tx.clone();
-                tokio::spawn(async move {
-                    while let Ok(msg) = events.recv().await {
-                        if let CdpMessage::Event { method, params } = msg {
-                            match method.as_str() {
-                                "Runtime.consoleAPICalled" => {
-                                    if let Some((level, message, location)) =
-                                        entry_from_console_api_called(&params)
-                                    {
-                                        let _ = evt_tx.send(DebuggerEvent::Log {
-                                            level,
-                                            message,
-                                            location,
-                                        });
-                                    }
+    let transport = match CdpTransport::connect(&ws_url).await {
+        Ok(t) => Arc::new(t),
+        Err(e) => {
+            warn!(target: "atomio::bridge", error = %e, "transport connect failed");
+            let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Failed {
+                reason: e.to_string(),
+            }));
+            return;
+        }
+    };
+
+    let _ = transport.send(&runtime_enable()).await;
+    let _ = transport.send(&debugger_enable()).await;
+
+    let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Connected {
+        ws_url: ws_url.clone(),
+    }));
+
+    let mut events = transport.subscribe();
+    let evt_tx = evt_tx.clone();
+    let pending = pending.clone();
+    tokio::spawn(async move {
+        while let Ok(msg) = events.recv().await {
+            match msg {
+                CdpMessage::Event { method, params } => match method.as_str() {
+                    "Runtime.consoleAPICalled" => {
+                        if let Some((level, message, location)) =
+                            entry_from_console_api_called(&params)
+                        {
+                            let _ = evt_tx.send(DebuggerEvent::Log {
+                                level,
+                                message,
+                                location,
+                            });
+                        }
+                    }
+                    "Debugger.scriptParsed" => {
+                        if let Some(script) = Script::from_script_parsed(&params) {
+                            let _ = evt_tx.send(DebuggerEvent::ScriptParsed(script));
+                        }
+                    }
+                    "Debugger.breakpointResolved" => {
+                        if let Some((server_id, line)) = parse_breakpoint_resolved(&params) {
+                            let _ =
+                                evt_tx.send(DebuggerEvent::BreakpointResolved { server_id, line });
+                        }
+                    }
+                    "Debugger.paused" => {
+                        let reason = params
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("other")
+                            .to_string();
+                        let frames = params
+                            .get("callFrames")
+                            .cloned()
+                            .unwrap_or(Value::Array(vec![]));
+                        let _ = evt_tx.send(DebuggerEvent::Paused { reason, frames });
+                    }
+                    "Debugger.resumed" => {
+                        let _ = evt_tx.send(DebuggerEvent::Resumed);
+                    }
+                    _ => {}
+                },
+                CdpMessage::Response { id, result } => {
+                    // Match against pending breakpoint requests.
+                    let local = pending.lock().await.remove(&id);
+                    if let Some(local) = local {
+                        match result {
+                            Ok(value) => {
+                                if let Some((server_id, line)) =
+                                    parse_set_breakpoint_response(&value)
+                                {
+                                    let _ = evt_tx.send(DebuggerEvent::BreakpointSet {
+                                        local,
+                                        server_id,
+                                        line,
+                                    });
                                 }
-                                "Debugger.scriptParsed" => {
-                                    if let Some(script) = Script::from_script_parsed(&params) {
-                                        let _ = evt_tx.send(DebuggerEvent::ScriptParsed(script));
-                                    }
-                                }
-                                _ => {}
+                            }
+                            Err(e) => {
+                                warn!(
+                                    target: "atomio::bridge",
+                                    code = e.code,
+                                    msg = %e.message,
+                                    "setBreakpointByUrl error"
+                                );
                             }
                         }
                     }
-                });
-
-                current = Some(transport);
+                }
             }
         }
+    });
+
+    *transport_slot.lock().await = Some(transport);
+}
+
+/// Pull `breakpointId` and the first resolved line out of a
+/// `Debugger.setBreakpointByUrl` success response.
+fn parse_set_breakpoint_response(value: &Value) -> Option<(String, Option<u32>)> {
+    let server_id = value.get("breakpointId")?.as_str()?.to_string();
+    let line = value
+        .get("locations")
+        .and_then(|l| l.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|loc| loc.get("lineNumber"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+    Some((server_id, line))
+}
+
+/// Extract `breakpointId` + resolved line from a `Debugger.breakpointResolved` event.
+fn parse_breakpoint_resolved(params: &Value) -> Option<(String, u32)> {
+    let server_id = params.get("breakpointId")?.as_str()?.to_string();
+    let line = params
+        .get("location")
+        .and_then(|loc| loc.get("lineNumber"))
+        .and_then(|v| v.as_u64())? as u32;
+    Some((server_id, line))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_set_breakpoint_with_locations() {
+        let v = serde_json::json!({
+            "breakpointId": "srv-1",
+            "locations": [{"scriptId": "42", "lineNumber": 17, "columnNumber": 0}]
+        });
+        let (id, line) = parse_set_breakpoint_response(&v).unwrap();
+        assert_eq!(id, "srv-1");
+        assert_eq!(line, Some(17));
+    }
+
+    #[test]
+    fn parse_set_breakpoint_no_locations() {
+        let v = serde_json::json!({"breakpointId": "srv-1", "locations": []});
+        let (id, line) = parse_set_breakpoint_response(&v).unwrap();
+        assert_eq!(id, "srv-1");
+        assert!(line.is_none());
+    }
+
+    #[test]
+    fn parse_breakpoint_resolved_event() {
+        let p = serde_json::json!({
+            "breakpointId": "srv-2",
+            "location": {"scriptId": "1", "lineNumber": 99, "columnNumber": 4}
+        });
+        let (id, line) = parse_breakpoint_resolved(&p).unwrap();
+        assert_eq!(id, "srv-2");
+        assert_eq!(line, 99);
+    }
+
+    #[test]
+    fn parse_breakpoint_resolved_missing_line() {
+        let p = serde_json::json!({"breakpointId": "x"});
+        assert!(parse_breakpoint_resolved(&p).is_none());
     }
 }
