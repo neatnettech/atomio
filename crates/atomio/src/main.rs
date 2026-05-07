@@ -57,7 +57,6 @@ actions!(
         DismissPalette,
         Connect,
         Disconnect,
-        ToggleConsole,
         ClearConsole,
         OpenFirstScript,
         OpenLogFile,
@@ -224,8 +223,6 @@ struct AtomioWindow {
     palette_selected: usize,
     /// Console log buffer fed by the CDP bridge.
     console: Console,
-    /// Whether the console pane is rendered.
-    console_visible: bool,
     /// Current debugger connection state, mirrored from the worker thread.
     connection: ConnectionState,
     /// Bridge to the CDP worker thread. `None` until the runtime initialises it.
@@ -254,7 +251,6 @@ fn build_command_registry() -> CommandRegistry {
     reg.register("Edit: Paste", "paste");
     reg.register("Edit: Select All", "select_all");
     reg.register("View: Toggle Command Palette", "toggle_palette");
-    reg.register("View: Toggle Console", "toggle_console");
     reg.register("Debug: Connect", "connect");
     reg.register("Debug: Disconnect", "disconnect");
     reg.register("Debug: Clear Console", "clear_console");
@@ -659,7 +655,6 @@ impl AtomioWindow {
             "paste" => self.on_paste(&Paste, window, cx),
             "select_all" => self.on_select_all(&SelectAll, window, cx),
             "toggle_palette" => self.on_toggle_palette(&TogglePalette, window, cx),
-            "toggle_console" => self.on_toggle_console(&ToggleConsole, window, cx),
             "connect" => self.on_connect(&Connect, window, cx),
             "disconnect" => self.on_disconnect(&Disconnect, window, cx),
             "clear_console" => self.on_clear_console(&ClearConsole, window, cx),
@@ -680,10 +675,6 @@ impl AtomioWindow {
         }
     }
 
-    fn on_toggle_console(&mut self, _: &ToggleConsole, _: &mut Window, cx: &mut Context<Self>) {
-        self.console_visible = !self.console_visible;
-        cx.notify();
-    }
     fn on_clear_console(&mut self, _: &ClearConsole, _: &mut Window, cx: &mut Context<Self>) {
         self.console.clear();
         cx.notify();
@@ -1142,7 +1133,6 @@ impl Render for AtomioWindow {
         let cursor = self.cursor_label();
         let status = self.status.clone();
         let title = self.title();
-        let console_visible = self.console_visible;
         let connection_label: SharedString = match &self.connection {
             ConnectionState::Disconnected => "● disconnected".into(),
             ConnectionState::Scanning => "● scanning".into(),
@@ -1156,9 +1146,6 @@ impl Render for AtomioWindow {
             ConnectionState::Failed { .. } => theme::ERROR,
             ConnectionState::Disconnected => theme::TX_4,
         };
-
-        // Drop unused locals from earlier layout.
-        let _ = console_visible;
 
         // Build palette overlay if visible. Rendered as a Spotlight-style
         // floating panel: absolutely positioned, horizontally centred,
@@ -1252,7 +1239,6 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_toggle_palette))
             .on_action(cx.listener(Self::on_confirm_palette))
             .on_action(cx.listener(Self::on_dismiss_palette))
-            .on_action(cx.listener(Self::on_toggle_console))
             .on_action(cx.listener(Self::on_clear_console))
             .on_action(cx.listener(Self::on_open_first_script))
             .on_action(cx.listener(Self::on_open_log_file))
@@ -1522,7 +1508,6 @@ fn main() {
             KeyBinding::new("enter", ConfirmPalette, Some("atomio")),
             KeyBinding::new("escape", DismissPalette, Some("atomio")),
             KeyBinding::new("cmd-shift-d", Connect, Some("atomio")),
-            KeyBinding::new("cmd-shift-c", ToggleConsole, Some("atomio")),
             KeyBinding::new("cmd-k", ClearConsole, Some("atomio")),
             KeyBinding::new("cmd-shift-o", OpenFirstScript, Some("atomio")),
             KeyBinding::new("f5", DebugResume, Some("atomio")),
@@ -1560,13 +1545,11 @@ fn main() {
                     cx.new(|cx| AtomioWindow {
                         state,
                         commands,
-                        status: "cmd+shift+p palette · cmd+shift+d connect · cmd+shift+c console"
-                            .into(),
+                        status: "cmd+shift+p palette · cmd+shift+d connect · cmd+1..6 panes".into(),
                         focus_handle: cx.focus_handle(),
                         palette_query: None,
                         palette_selected: 0,
                         console: Console::new(),
-                        console_visible: true,
                         connection: ConnectionState::Disconnected,
                         bridge: Some(bridge),
                         scripts: ScriptRegistry::new(),
