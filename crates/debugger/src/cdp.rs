@@ -133,13 +133,24 @@ pub fn debugger_enable() -> CdpRequest {
 }
 
 /// `Debugger.setBreakpointByUrl` -- set a breakpoint by source URL and line.
-pub fn set_breakpoint_by_url(url: &str, line: u32, column: Option<u32>) -> CdpRequest {
+/// `condition` is an expression evaluated each hit; the runtime only halts
+/// when it returns truthy. Logpoints are encoded as conditions of the form
+/// `console.log(...) || false`.
+pub fn set_breakpoint_by_url(
+    url: &str,
+    line: u32,
+    column: Option<u32>,
+    condition: Option<&str>,
+) -> CdpRequest {
     let mut params = serde_json::json!({
         "url": url,
         "lineNumber": line,
     });
     if let Some(col) = column {
         params["columnNumber"] = serde_json::json!(col);
+    }
+    if let Some(cond) = condition {
+        params["condition"] = serde_json::json!(cond);
     }
     CdpRequest::with_params("Debugger.setBreakpointByUrl", params)
 }
@@ -227,11 +238,19 @@ mod tests {
 
     #[test]
     fn request_serializes_with_params() {
-        let req = set_breakpoint_by_url("file:///app.js", 10, Some(5));
+        let req = set_breakpoint_by_url("file:///app.js", 10, Some(5), None);
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["method"], "Debugger.setBreakpointByUrl");
         assert_eq!(json["params"]["lineNumber"], 10);
         assert_eq!(json["params"]["columnNumber"], 5);
+        assert!(json["params"].get("condition").is_none());
+    }
+
+    #[test]
+    fn breakpoint_with_condition() {
+        let req = set_breakpoint_by_url("file:///x.js", 1, None, Some("count > 5"));
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["params"]["condition"], "count > 5");
     }
 
     #[test]

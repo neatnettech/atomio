@@ -79,6 +79,13 @@ actions!(
     ]
 );
 
+/// Breakpoint flavour for the conditional / logpoint palette flow.
+#[derive(Debug, Clone, Copy)]
+enum BpKind {
+    Conditional,
+    Logpoint,
+}
+
 /// Right-dock pane selector. Mirrors the activity-bar items in the design
 /// spec; only [`DockPane::Console`] and [`DockPane::Files`] are functional
 /// today, the others render placeholders pointing at the milestone where
@@ -696,6 +703,38 @@ impl AtomioWindow {
         let Some(query) = self.palette_query.take() else {
             return;
         };
+        // Special prefix sigils let users feed free-form input to the
+        // debugger without a separate modal:
+        //   `=expr` -- add watch
+        //   `?expr` -- set conditional breakpoint at cursor line
+        //   `!expr` -- set logpoint at cursor line (logs `expr`, never halts)
+        if let Some(rest) = query.strip_prefix('=') {
+            let expr = rest.trim();
+            if !expr.is_empty() {
+                self.add_watch(expr.to_string(), cx);
+            }
+            self.palette_selected = 0;
+            cx.notify();
+            return;
+        }
+        if let Some(rest) = query.strip_prefix('?') {
+            let expr = rest.trim();
+            if !expr.is_empty() {
+                self.set_breakpoint_with_kind(BpKind::Conditional, expr, cx);
+            }
+            self.palette_selected = 0;
+            cx.notify();
+            return;
+        }
+        if let Some(rest) = query.strip_prefix('!') {
+            let expr = rest.trim();
+            if !expr.is_empty() {
+                self.set_breakpoint_with_kind(BpKind::Logpoint, expr, cx);
+            }
+            self.palette_selected = 0;
+            cx.notify();
+            return;
+        }
         let matches = self.commands.search(&query);
         if let Some(m) = matches.get(self.palette_selected) {
             self.dispatch_command(&m.command.id, window, cx);
@@ -860,6 +899,52 @@ impl AtomioWindow {
 
     /// Toggle breakpoint at zero-based `line` for the currently displayed
     /// source. Sends the corresponding CDP command via the bridge.
+    /// Set a conditional breakpoint or logpoint at the cursor's current line.
+    /// `kind` selects which encoding to use; `expr` is the user's input.
+    fn set_breakpoint_with_kind(&mut self, kind: BpKind, expr: &str, cx: &mut Context<Self>) {
+        let Some(url) = self.current_url.clone() else {
+            self.status = "no source loaded — cmd+shift+o first".into();
+            cx.notify();
+            return;
+        };
+        let (line, _col) = self.state.cursor_line_col();
+        let line = line as u32;
+        let condition = match kind {
+            BpKind::Conditional => format!("({expr})"),
+            // Logpoint: side-effect log + always-falsy so runtime never halts.
+            BpKind::Logpoint => format!("console.log({expr}), false"),
+        };
+        // If a bp already exists on this line, drop it first so we replace
+        // it with the conditioned variant.
+        let existing = self
+            .breakpoints
+            .iter_for_url(&url)
+            .find(|bp| bp.requested_line == line)
+            .map(|bp| (bp.id, bp.server_id.clone()));
+        if let Some((id, server_id)) = existing {
+            self.breakpoints.remove(id);
+            if let Some(sid) = server_id {
+                self.send_debug(DebuggerCommand::RemoveBreakpoint { server_id: sid });
+            }
+        }
+        let local = self
+            .breakpoints
+            .set(url.clone(), line, None, Some(condition.clone()));
+        self.send_debug(DebuggerCommand::SetBreakpoint {
+            local,
+            url,
+            line,
+            column: None,
+            condition: Some(condition),
+        });
+        self.status = match kind {
+            BpKind::Conditional => format!("conditional breakpoint @ ln {}: {expr}", line + 1),
+            BpKind::Logpoint => format!("logpoint @ ln {}: {expr}", line + 1),
+        }
+        .into();
+        cx.notify();
+    }
+
     fn toggle_breakpoint_at(&mut self, line: u32, cx: &mut Context<Self>) {
         use debugger::breakpoints::ToggleOutcome;
         let Some(url) = self.current_url.clone() else {
@@ -1814,15 +1899,24 @@ impl Render for AtomioWindow {
                         .text_sm()
                         .text_color(rgb(theme::TX_1))
                         .child(if query.is_empty() {
-                            "> type to search...".to_string()
+                            "> type to search · = watch · ? cond bp · ! logpoint".to_string()
                         } else {
                             format!("> {query}")
                         }),
                 );
-            if !matches.is_empty() {
+            // Suppress the candidate list when using a sigil prefix —
+            // there are no matching commands and the rows would distract
+            // from the literal expression being typed.
+            let prefix_active = matches!(query.chars().next(), Some('=') | Some('?') | Some('!'));
+            if !matches.is_empty() && !prefix_active {
                 inner = inner.child(div().h(px(1.0)).mx_2().bg(rgb(theme::LINE_2)));
             }
-            for (i, m) in matches.iter().take(10).enumerate() {
+            let candidates: Vec<_> = if prefix_active {
+                Vec::new()
+            } else {
+                matches.iter().take(10).cloned().collect()
+            };
+            for (i, m) in candidates.iter().enumerate() {
                 let bg = if i == selected {
                     theme::BG_3
                 } else {
