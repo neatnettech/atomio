@@ -196,6 +196,18 @@ pub fn evaluate(expression: &str) -> CdpRequest {
     )
 }
 
+/// `Debugger.evaluateOnCallFrame` -- evaluate an expression in the
+/// scope of a paused call frame (so locals/closure refs resolve).
+pub fn evaluate_on_call_frame(call_frame_id: &str, expression: &str) -> CdpRequest {
+    CdpRequest::with_params(
+        "Debugger.evaluateOnCallFrame",
+        serde_json::json!({
+            "callFrameId": call_frame_id,
+            "expression": expression,
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
