@@ -17,7 +17,9 @@ macOS (Apple Silicon) first. MIT licensed. No CLA.
 
 atomio is **dark-only**, **Zed-minimal with Atom warmth**, all-in-one. Editor, debugger, console, simulator, component tree, and profiler in a single window -- no browser tabs, no Electron, no context-switching.
 
-Live interactive mock: open [`docs/design/handoff/project/atomio.html`](docs/design/handoff/project/atomio.html) in any modern browser (no build step).
+Live interactive mocks (open in any browser, no build step):
+- App: [`docs/design/handoff/project/atomio.html`](docs/design/handoff/project/atomio.html)
+- Brand (icons + GitHub hero + social card): [`docs/design/brand-handoff/project/brand.html`](docs/design/brand-handoff/project/brand.html)
 
 ```
 +----------------------------------------------------------------------+
@@ -46,7 +48,7 @@ Live interactive mock: open [`docs/design/handoff/project/atomio.html`](docs/des
 
 **Accent green** `#3ecf8e` for run states. **Calm syntax palette** (Zed One Dark adjacent). **SF Pro + SF Mono.** **Spotlight-style command palette** (Cmd+Shift+P) drives everything.
 
-Full design spec: [`docs/design.md`](docs/design.md). Handoff bundle: [`docs/design/handoff/`](docs/design/handoff/).
+Full design spec: [`docs/design.md`](docs/design.md). Handoff bundles: [`docs/design/handoff/`](docs/design/handoff/) (app), [`docs/design/brand-handoff/`](docs/design/brand-handoff/) (brand).
 
 ## Why
 
