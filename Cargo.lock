@@ -423,7 +423,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "atomio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "console",
  "debugger",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "console"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]
@@ -1260,7 +1260,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "debugger"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "serde",
@@ -1436,7 +1436,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "editor_core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ropey",
  "tempfile",
@@ -2753,7 +2753,7 @@ dependencies = [
 
 [[package]]
 name = "inspector"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]
@@ -2902,7 +2902,7 @@ dependencies = [
 
 [[package]]
 name = "language"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tree-sitter",
  "tree-sitter-javascript",
