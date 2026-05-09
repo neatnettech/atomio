@@ -12,6 +12,7 @@
 mod cdp_bridge;
 mod theme;
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -25,7 +26,7 @@ use gpui::{
     FocusHandle, Focusable, KeyBinding, KeyDownEvent, Render, SharedString, TitlebarOptions,
     Window, WindowBackgroundAppearance, WindowBounds, WindowOptions,
 };
-use inspector::CallStack;
+use inspector::{CallStack, Property};
 use language::{highlight, HighlightKind, Language, Span};
 use tracing::debug;
 
@@ -150,6 +151,20 @@ fn highlight_color(kind: HighlightKind) -> u32 {
 
 const DEFAULT_FG: u32 = theme::SX_PL;
 
+/// Map a CDP `RemoteObject.type` string to a syntax colour for the
+/// variables tree. Falls back to TX_2 when unknown.
+fn value_color_for(type_str: &str) -> u32 {
+    match type_str {
+        "string" => theme::SX_STR,
+        "number" | "bigint" => theme::SX_NUM,
+        "boolean" => theme::SX_NUM,
+        "function" => theme::SX_FN,
+        "object" => theme::SX_PROP,
+        "undefined" | "symbol" => theme::TX_4,
+        _ => theme::TX_2,
+    }
+}
+
 /// Map a [`console::LogLevel`] to a rendering colour.
 fn log_level_color(level: console::LogLevel) -> u32 {
     use console::LogLevel::*;
@@ -243,6 +258,15 @@ struct AtomioWindow {
     /// when rendering the call stack.
     /// Decoded call stack from the most recent `Debugger.paused` event.
     call_stack: Option<CallStack>,
+    /// CDP `objectId` -> last-fetched properties. Populated by Properties
+    /// events; cleared on resume.
+    properties: HashMap<String, Vec<Property>>,
+    /// `objectId`s currently rendered as expanded in the variables tree.
+    expanded: HashSet<String>,
+    /// Counter for tagging in-flight `GetProperties` requests.
+    next_props_tag: u64,
+    /// Tag -> `objectId` for matching response back to the right key.
+    pending_props_tags: HashMap<u64, String>,
     /// Currently active right-dock pane.
     dock: DockPane,
     /// CDP source URL of the currently displayed buffer (when fetched from
@@ -756,6 +780,9 @@ impl AtomioWindow {
         self.breakpoints.clear();
         self.paused = false;
         self.call_stack = None;
+        self.properties.clear();
+        self.expanded.clear();
+        self.pending_props_tags.clear();
         cx.notify();
     }
 
@@ -834,6 +861,27 @@ impl AtomioWindow {
                     self.send_debug(DebuggerCommand::RemoveBreakpoint { server_id: sid });
                 }
                 self.status = format!("breakpoint cleared @ {url}:{line}").into();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Toggle expanded state for a CDP `objectId`. Fetches properties on
+    /// first expand; subsequent toggles flip visibility without re-fetch.
+    fn toggle_object(&mut self, object_id: String, cx: &mut Context<Self>) {
+        if self.expanded.contains(&object_id) {
+            self.expanded.remove(&object_id);
+        } else {
+            self.expanded.insert(object_id.clone());
+            if !self.properties.contains_key(&object_id) {
+                let tag = self.next_props_tag;
+                self.next_props_tag += 1;
+                self.pending_props_tags.insert(tag, object_id.clone());
+                self.send_debug(DebuggerCommand::GetProperties {
+                    tag,
+                    object_id,
+                    own_properties: true,
+                });
             }
         }
         cx.notify();
@@ -943,15 +991,17 @@ impl AtomioWindow {
                 DebuggerEvent::Resumed => {
                     self.paused = false;
                     self.call_stack = None;
+                    self.properties.clear();
+                    self.expanded.clear();
+                    self.pending_props_tags.clear();
                     self.status = "resumed".into();
                     changed = true;
                 }
                 DebuggerEvent::Properties { tag, properties } => {
                     debug!(target: "atomio", tag, count = properties.len(), "properties");
-                    let _ = (tag, properties);
-                    // Property expansion UI lands in a follow-up PR; for
-                    // now we accept and discard so the bridge match is
-                    // exhaustive.
+                    if let Some(object_id) = self.pending_props_tags.remove(&tag) {
+                        self.properties.insert(object_id, properties);
+                    }
                     changed = true;
                 }
             }
@@ -1239,7 +1289,7 @@ impl AtomioWindow {
                 "● running".to_string()
             });
 
-        let body = self.render_debugger_lower();
+        let body = self.render_debugger_lower(cx);
 
         div()
             .flex()
@@ -1252,7 +1302,7 @@ impl AtomioWindow {
     /// Lower portion of the Debugger pane: call stack list + scopes for
     /// the selected frame. Renders a placeholder when not paused. Variable
     /// expansion (lazy property fetch) ships in a follow-up PR.
-    fn render_debugger_lower(&self) -> gpui::Div {
+    fn render_debugger_lower(&self, cx: &mut Context<Self>) -> gpui::Div {
         let Some(stack) = self.call_stack.as_ref() else {
             return div()
                 .flex_1()
@@ -1318,23 +1368,34 @@ impl AtomioWindow {
                     .pb_1()
                     .child(format!("Scopes ({})", top.scopes.len())),
             );
-            for scope in &top.scopes {
+            for (si, scope) in top.scopes.iter().enumerate() {
                 let label = scope.kind.label();
-                scopes_section = scopes_section.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .justify_between()
-                        .text_xs()
-                        .text_color(rgb(theme::TX_2))
-                        .py_1()
-                        .child(div().child(format!("▸ {label}")))
-                        .child(
-                            div()
-                                .text_color(rgb(theme::TX_4))
-                                .child(scope.name.clone().unwrap_or_default()),
-                        ),
-                );
+                let object_id = scope.object_id.clone();
+                let is_open = self.expanded.contains(&object_id);
+                let arrow = if is_open { "▾" } else { "▸" };
+                let id_for_click = object_id.clone();
+                let row = div()
+                    .id(SharedString::from(format!("scope-{si}")))
+                    .flex()
+                    .flex_row()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(rgb(theme::TX_2))
+                    .py_1()
+                    .child(div().child(format!("{arrow} {label}")))
+                    .child(
+                        div()
+                            .text_color(rgb(theme::TX_4))
+                            .child(scope.name.clone().unwrap_or_default()),
+                    )
+                    .on_click(cx.listener(move |this, _ev, _win, cx| {
+                        this.toggle_object(id_for_click.clone(), cx);
+                    }));
+                scopes_section = scopes_section.child(row);
+                if is_open {
+                    scopes_section =
+                        scopes_section.child(self.render_property_list(&object_id, 1, cx));
+                }
             }
         }
 
@@ -1344,6 +1405,106 @@ impl AtomioWindow {
             .flex_col()
             .child(frames_section)
             .child(scopes_section)
+    }
+
+    /// Recursive render of a property list (for a given `objectId`).
+    /// `indent` is in tree levels; depth-limit kicks in at 6 to avoid
+    /// runaway recursion on cyclic objects (CDP doesn't loop, but caps
+    /// keep the UI tame).
+    fn render_property_list(
+        &self,
+        object_id: &str,
+        indent: u32,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut wrap = div().flex().flex_col().pl(px((indent * 12) as f32));
+        let Some(props) = self.properties.get(object_id) else {
+            wrap = wrap.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::TX_4))
+                    .py_1()
+                    .child("loading..."),
+            );
+            return wrap;
+        };
+        if props.is_empty() {
+            wrap = wrap.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::TX_4))
+                    .py_1()
+                    .child("(empty)"),
+            );
+            return wrap;
+        }
+        if indent > 6 {
+            wrap = wrap.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::TX_4))
+                    .py_1()
+                    .child("(depth limit)"),
+            );
+            return wrap;
+        }
+        for (pi, prop) in props.iter().enumerate() {
+            let value_display = prop
+                .value
+                .as_ref()
+                .map(|v| v.display.clone())
+                .unwrap_or_default();
+            let value_color = prop
+                .value
+                .as_ref()
+                .map(|v| value_color_for(v.type_str.as_str()))
+                .unwrap_or(theme::TX_3);
+            let inner_object_id = prop
+                .value
+                .as_ref()
+                .filter(|v| v.expandable)
+                .and_then(|v| v.object_id.clone());
+            let is_open = inner_object_id
+                .as_ref()
+                .is_some_and(|oid| self.expanded.contains(oid));
+            let arrow = if inner_object_id.is_none() {
+                "  "
+            } else if is_open {
+                "▾ "
+            } else {
+                "▸ "
+            };
+            let row_object_id = inner_object_id.clone();
+            let key = format!("{object_id}-{pi}");
+            let mut row = div()
+                .id(SharedString::from(key))
+                .flex()
+                .flex_row()
+                .gap_2()
+                .text_xs()
+                .py(px(2.0))
+                .child(div().w(px(14.0)).text_color(rgb(theme::TX_4)).child(arrow))
+                .child(div().text_color(rgb(theme::TX_2)).child(prop.name.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(rgb(value_color))
+                        .child(value_display),
+                );
+            if let Some(oid) = row_object_id {
+                let oid_clone = oid.clone();
+                row = row.on_click(cx.listener(move |this, _ev, _win, cx| {
+                    this.toggle_object(oid_clone.clone(), cx);
+                }));
+            }
+            wrap = wrap.child(row);
+            if is_open {
+                if let Some(oid) = inner_object_id {
+                    wrap = wrap.child(self.render_property_list(&oid, indent + 1, cx));
+                }
+            }
+        }
+        wrap
     }
 
     /// Build one step-control button. Disabled-looking when `enabled` is
@@ -1893,6 +2054,10 @@ fn main() {
                         breakpoints: BreakpointRegistry::new(),
                         paused: false,
                         call_stack: None,
+                        properties: HashMap::new(),
+                        expanded: HashSet::new(),
+                        next_props_tag: 0,
+                        pending_props_tags: HashMap::new(),
                         dock: DockPane::Console,
                         current_url: None,
                     })
