@@ -230,13 +230,13 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                 url,
                 line,
                 column,
-                condition: _condition,
+                condition,
             } => {
                 let Some(t) = transport.lock().await.clone() else {
                     warn!(target: "atomio::bridge", "set breakpoint while disconnected");
                     continue;
                 };
-                let req = set_breakpoint_by_url(&url, line, column);
+                let req = set_breakpoint_by_url(&url, line, column, condition.as_deref());
                 let req_id = req.id;
                 debug!(
                     target: "atomio::bridge",
