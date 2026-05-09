@@ -18,13 +18,13 @@ use console::{entry_from_console_api_called, LogLevel, SourceLocation};
 use debugger::breakpoints::BreakpointId;
 use debugger::cdp::{
     debugger_enable, debugger_pause, debugger_resume, debugger_step_into, debugger_step_out,
-    debugger_step_over, get_properties, remove_breakpoint, runtime_enable, set_breakpoint_by_url,
-    CdpMessage,
+    debugger_step_over, evaluate_on_call_frame, get_properties, remove_breakpoint, runtime_enable,
+    set_breakpoint_by_url, CdpMessage,
 };
 use debugger::metro::{fetch_source, scan_localhost};
 use debugger::scripts::Script;
 use debugger::transport::CdpTransport;
-use inspector::{CallStack, Property};
+use inspector::{CallStack, Property, RemoteValue};
 use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -68,6 +68,13 @@ pub enum DebuggerCommand {
         tag: u64,
         object_id: String,
         own_properties: bool,
+    },
+    /// Evaluate an expression in the context of a paused call frame.
+    /// Used for watch expressions. Result emitted as [`DebuggerEvent::WatchEvaluated`].
+    EvaluateWatch {
+        tag: u64,
+        call_frame_id: String,
+        expression: String,
     },
     /// Step controls -- map directly to CDP `Debugger.*` methods.
     Resume,
@@ -114,6 +121,11 @@ pub enum DebuggerEvent {
     Resumed,
     /// Result of [`DebuggerCommand::GetProperties`].
     Properties { tag: u64, properties: Vec<Property> },
+    /// Result of [`DebuggerCommand::EvaluateWatch`].
+    WatchEvaluated {
+        tag: u64,
+        result: Result<RemoteValue, String>,
+    },
 }
 
 /// Coarse connection state. Detailed CDP state lives in the worker.
@@ -169,6 +181,8 @@ type PendingBreakpoints = Arc<Mutex<HashMap<u64, BreakpointId>>>;
 /// CDP request id → caller-supplied tag awaiting a `Runtime.getProperties`
 /// response.
 type PendingProperties = Arc<Mutex<HashMap<u64, u64>>>;
+/// CDP request id → caller-supplied tag awaiting a watch evaluation.
+type PendingWatches = Arc<Mutex<HashMap<u64, u64>>>;
 
 /// The worker's async main loop. One outstanding CDP connection at a time.
 async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerEvent>) {
@@ -177,6 +191,7 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
     let transport: Arc<Mutex<Option<Arc<CdpTransport>>>> = Arc::new(Mutex::new(None));
     let pending: PendingBreakpoints = Arc::new(Mutex::new(HashMap::new()));
     let pending_props: PendingProperties = Arc::new(Mutex::new(HashMap::new()));
+    let pending_watches: PendingWatches = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
         // Block on a command from the UI. Channel close = shutdown.
@@ -201,7 +216,14 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                 });
             }
             DebuggerCommand::Connect => {
-                connect(&transport, &pending, &pending_props, &evt_tx).await;
+                connect(
+                    &transport,
+                    &pending,
+                    &pending_props,
+                    &pending_watches,
+                    &evt_tx,
+                )
+                .await;
             }
             DebuggerCommand::SetBreakpoint {
                 local,
@@ -236,6 +258,29 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                 };
                 debug!(target: "atomio::bridge", server_id = %server_id, "-> removeBreakpoint");
                 let _ = t.send(&remove_breakpoint(&server_id)).await;
+            }
+            DebuggerCommand::EvaluateWatch {
+                tag,
+                call_frame_id,
+                expression,
+            } => {
+                let Some(t) = transport.lock().await.clone() else {
+                    continue;
+                };
+                let req = evaluate_on_call_frame(&call_frame_id, &expression);
+                let req_id = req.id;
+                debug!(
+                    target: "atomio::bridge",
+                    tag,
+                    req_id,
+                    expression = %expression,
+                    "-> evaluateOnCallFrame"
+                );
+                pending_watches.lock().await.insert(req_id, tag);
+                if let Err(e) = t.send(&req).await {
+                    warn!(target: "atomio::bridge", error = %e, "send evaluateOnCallFrame failed");
+                    pending_watches.lock().await.remove(&req_id);
+                }
             }
             DebuggerCommand::GetProperties {
                 tag,
@@ -294,6 +339,7 @@ async fn connect(
     transport_slot: &Arc<Mutex<Option<Arc<CdpTransport>>>>,
     pending: &PendingBreakpoints,
     pending_props: &PendingProperties,
+    pending_watches: &PendingWatches,
     evt_tx: &Sender<DebuggerEvent>,
 ) {
     info!(target: "atomio::bridge", "connect requested");
@@ -360,6 +406,7 @@ async fn connect(
     let evt_tx = evt_tx.clone();
     let pending = pending.clone();
     let pending_props = pending_props.clone();
+    let pending_watches = pending_watches.clone();
     tokio::spawn(async move {
         while let Ok(msg) = events.recv().await {
             match msg {
@@ -448,6 +495,29 @@ async fn connect(
                                 );
                             }
                         }
+                        continue;
+                    }
+                    // Match against pending watch evaluations.
+                    let watch_tag = pending_watches.lock().await.remove(&id);
+                    if let Some(tag) = watch_tag {
+                        let result = match result {
+                            Ok(value) => {
+                                if let Some(exc) = value.get("exceptionDetails") {
+                                    let msg = exc
+                                        .get("text")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("evaluation error")
+                                        .to_string();
+                                    Err(msg)
+                                } else if let Some(rv) = value.get("result") {
+                                    Ok(RemoteValue::from_cdp(rv))
+                                } else {
+                                    Err("malformed evaluate response".to_string())
+                                }
+                            }
+                            Err(e) => Err(format!("CDP error {}: {}", e.code, e.message)),
+                        };
+                        let _ = evt_tx.send(DebuggerEvent::WatchEvaluated { tag, result });
                     }
                 }
             }

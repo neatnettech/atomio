@@ -26,7 +26,7 @@ use gpui::{
     FocusHandle, Focusable, KeyBinding, KeyDownEvent, Render, SharedString, TitlebarOptions,
     Window, WindowBackgroundAppearance, WindowBounds, WindowOptions,
 };
-use inspector::{CallStack, Property};
+use inspector::{CallStack, Property, WatchList};
 use language::{highlight, HighlightKind, Language, Span};
 use tracing::debug;
 
@@ -68,6 +68,8 @@ actions!(
         DebugStepInto,
         DebugStepOut,
         DebugPause,
+        WatchThis,
+        WatchClear,
         ShowFiles,
         ShowDebugger,
         ShowSimulator,
@@ -267,6 +269,12 @@ struct AtomioWindow {
     next_props_tag: u64,
     /// Tag -> `objectId` for matching response back to the right key.
     pending_props_tags: HashMap<u64, String>,
+    /// User-defined watch expressions, evaluated on each pause.
+    watches: WatchList,
+    /// Tag -> watch index for matching `WatchEvaluated` responses.
+    pending_watch_tags: HashMap<u64, usize>,
+    /// Counter for tagging in-flight evaluate requests.
+    next_watch_tag: u64,
     /// Currently active right-dock pane.
     dock: DockPane,
     /// CDP source URL of the currently displayed buffer (when fetched from
@@ -295,6 +303,8 @@ fn build_command_registry() -> CommandRegistry {
     reg.register("Debug: Step Into (F11)", "debug_step_into");
     reg.register("Debug: Step Out (Shift+F11)", "debug_step_out");
     reg.register("Debug: Pause", "debug_pause");
+    reg.register("Debug: Watch 'this'", "watch_this");
+    reg.register("Debug: Clear Watches", "watch_clear");
     reg.register("View: Files Pane", "show_files");
     reg.register("View: Debugger Pane", "show_debugger");
     reg.register("View: Simulator Pane", "show_simulator");
@@ -715,6 +725,8 @@ impl AtomioWindow {
             "debug_step_into" => self.on_debug_step_into(&DebugStepInto, window, cx),
             "debug_step_out" => self.on_debug_step_out(&DebugStepOut, window, cx),
             "debug_pause" => self.on_debug_pause(&DebugPause, window, cx),
+            "watch_this" => self.on_watch_this(&WatchThis, window, cx),
+            "watch_clear" => self.on_watch_clear(&WatchClear, window, cx),
             "show_files" => self.on_show_files(&ShowFiles, window, cx),
             "show_debugger" => self.on_show_debugger(&ShowDebugger, window, cx),
             "show_simulator" => self.on_show_simulator(&ShowSimulator, window, cx),
@@ -812,6 +824,17 @@ impl AtomioWindow {
         self.send_debug(DebuggerCommand::Pause);
         cx.notify();
     }
+    fn on_watch_this(&mut self, _: &WatchThis, _: &mut Window, cx: &mut Context<Self>) {
+        self.add_watch("this", cx);
+    }
+    fn on_watch_clear(&mut self, _: &WatchClear, _: &mut Window, cx: &mut Context<Self>) {
+        let n = self.watches.len();
+        for i in (0..n).rev() {
+            self.watches.remove(i);
+        }
+        self.pending_watch_tags.clear();
+        cx.notify();
+    }
     fn show_dock(&mut self, pane: DockPane, cx: &mut Context<Self>) {
         self.dock = pane;
         cx.notify();
@@ -866,6 +889,54 @@ impl AtomioWindow {
         cx.notify();
     }
 
+    /// Add a watch expression. Triggers immediate eval if currently paused.
+    fn add_watch(&mut self, expression: impl Into<String>, cx: &mut Context<Self>) {
+        let idx = self.watches.add(expression);
+        if self.paused {
+            self.evaluate_watch_at(idx);
+        }
+        cx.notify();
+    }
+
+    /// Remove a watch expression by index. Currently only callable from
+    /// future per-watch UI; kept here so the row-level remove handler can
+    /// land in a follow-up without restructuring.
+    #[allow(dead_code)]
+    fn remove_watch(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.watches.remove(idx);
+        cx.notify();
+    }
+
+    /// Re-evaluate all watch expressions against the current top frame.
+    fn evaluate_all_watches(&mut self) {
+        let n = self.watches.len();
+        for i in 0..n {
+            self.evaluate_watch_at(i);
+        }
+    }
+
+    /// Dispatch evaluation of one watch against the current top call frame.
+    fn evaluate_watch_at(&mut self, idx: usize) {
+        let Some(stack) = self.call_stack.as_ref() else {
+            return;
+        };
+        let Some(frame) = stack.frames.first() else {
+            return;
+        };
+        let Some(watch) = self.watches.get(idx) else {
+            return;
+        };
+        let tag = self.next_watch_tag;
+        self.next_watch_tag += 1;
+        self.pending_watch_tags.insert(tag, idx);
+        let cmd = DebuggerCommand::EvaluateWatch {
+            tag,
+            call_frame_id: frame.id.clone(),
+            expression: watch.expression.clone(),
+        };
+        self.send_debug(cmd);
+    }
+
     /// Toggle expanded state for a CDP `objectId`. Fetches properties on
     /// first expand; subsequent toggles flip visibility without re-fetch.
     fn toggle_object(&mut self, object_id: String, cx: &mut Context<Self>) {
@@ -902,9 +973,15 @@ impl AtomioWindow {
 
     /// Drain pending events from the bridge and apply them to the window.
     fn drain_bridge_events(&mut self, cx: &mut Context<Self>) {
-        let Some(bridge) = &self.bridge else { return };
+        // Collect events first so the immutable borrow on `self.bridge` is
+        // dropped before we start mutating other fields (some handlers
+        // dispatch back into the bridge, which needs `&self`).
+        let events: Vec<DebuggerEvent> = match &self.bridge {
+            Some(b) => b.events.try_iter().collect(),
+            None => return,
+        };
         let mut changed = false;
-        while let Ok(event) = bridge.events.try_recv() {
+        for event in events {
             match event {
                 DebuggerEvent::State(state) => {
                     self.status = match &state {
@@ -986,6 +1063,7 @@ impl AtomioWindow {
                     // Auto-switch dock to Debugger pane on pause so users
                     // see the call stack + scopes immediately.
                     self.dock = DockPane::Debugger;
+                    self.evaluate_all_watches();
                     changed = true;
                 }
                 DebuggerEvent::Resumed => {
@@ -994,6 +1072,11 @@ impl AtomioWindow {
                     self.properties.clear();
                     self.expanded.clear();
                     self.pending_props_tags.clear();
+                    self.pending_watch_tags.clear();
+                    // Clear stale watch results; expressions persist.
+                    for w in self.watches.iter_mut() {
+                        w.last = None;
+                    }
                     self.status = "resumed".into();
                     changed = true;
                 }
@@ -1001,6 +1084,14 @@ impl AtomioWindow {
                     debug!(target: "atomio", tag, count = properties.len(), "properties");
                     if let Some(object_id) = self.pending_props_tags.remove(&tag) {
                         self.properties.insert(object_id, properties);
+                    }
+                    changed = true;
+                }
+                DebuggerEvent::WatchEvaluated { tag, result } => {
+                    if let Some(idx) = self.pending_watch_tags.remove(&tag) {
+                        if let Some(w) = self.watches.iter_mut().nth(idx) {
+                            w.last = Some(result);
+                        }
                     }
                     changed = true;
                 }
@@ -1399,12 +1490,66 @@ impl AtomioWindow {
             }
         }
 
+        let watch_section = self.render_watch_section();
+
         div()
             .flex_1()
             .flex()
             .flex_col()
             .child(frames_section)
             .child(scopes_section)
+            .child(watch_section)
+    }
+
+    /// Watch expressions section. Header + each watch's last evaluated
+    /// value (or "evaluating..." when pending, or red error when CDP raised).
+    fn render_watch_section(&self) -> gpui::Div {
+        let mut wrap = div()
+            .flex()
+            .flex_col()
+            .px_3()
+            .py_2()
+            .border_t_1()
+            .border_color(rgb(theme::LINE_1))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::TX_3))
+                    .pb_1()
+                    .child(format!("Watch ({})", self.watches.len())),
+            );
+        if self.watches.is_empty() {
+            wrap = wrap.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::TX_4))
+                    .child("(empty — palette: Debug: Watch 'this')"),
+            );
+            return wrap;
+        }
+        for w in self.watches.iter() {
+            let (display, color) = match &w.last {
+                None => ("evaluating...".to_string(), theme::TX_4),
+                Some(Ok(rv)) => (rv.display.clone(), value_color_for(rv.type_str.as_str())),
+                Some(Err(e)) => (e.clone(), theme::ERROR),
+            };
+            wrap = wrap.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .text_xs()
+                    .py(px(2.0))
+                    .child(
+                        div()
+                            .w(px(120.0))
+                            .text_color(rgb(theme::TX_2))
+                            .child(w.expression.clone()),
+                    )
+                    .child(div().flex_1().text_color(rgb(color)).child(display)),
+            );
+        }
+        wrap
     }
 
     /// Recursive render of a property list (for a given `objectId`).
@@ -1747,6 +1892,8 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_debug_step_into))
             .on_action(cx.listener(Self::on_debug_step_out))
             .on_action(cx.listener(Self::on_debug_pause))
+            .on_action(cx.listener(Self::on_watch_this))
+            .on_action(cx.listener(Self::on_watch_clear))
             .on_action(cx.listener(Self::on_show_files))
             .on_action(cx.listener(Self::on_show_debugger))
             .on_action(cx.listener(Self::on_show_simulator))
@@ -2058,6 +2205,9 @@ fn main() {
                         expanded: HashSet::new(),
                         next_props_tag: 0,
                         pending_props_tags: HashMap::new(),
+                        watches: WatchList::new(),
+                        pending_watch_tags: HashMap::new(),
+                        next_watch_tag: 0,
                         dock: DockPane::Console,
                         current_url: None,
                     })
