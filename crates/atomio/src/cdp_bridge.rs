@@ -76,6 +76,13 @@ pub enum DebuggerCommand {
         call_frame_id: String,
         expression: String,
     },
+    /// Evaluate an identifier in the context of a paused call frame for
+    /// inline value display. Result emitted as
+    /// [`DebuggerEvent::InlineEvaluated`].
+    EvaluateInline {
+        ident: String,
+        call_frame_id: String,
+    },
     /// Step controls -- map directly to CDP `Debugger.*` methods.
     Resume,
     StepOver,
@@ -124,6 +131,12 @@ pub enum DebuggerEvent {
     /// Result of [`DebuggerCommand::EvaluateWatch`].
     WatchEvaluated {
         tag: u64,
+        result: Result<RemoteValue, String>,
+    },
+    /// Result of [`DebuggerCommand::EvaluateInline`]. The ident is echoed
+    /// back so the UI can drop the result into the right pill slot.
+    InlineEvaluated {
+        ident: String,
         result: Result<RemoteValue, String>,
     },
 }
@@ -183,6 +196,8 @@ type PendingBreakpoints = Arc<Mutex<HashMap<u64, BreakpointId>>>;
 type PendingProperties = Arc<Mutex<HashMap<u64, u64>>>;
 /// CDP request id → caller-supplied tag awaiting a watch evaluation.
 type PendingWatches = Arc<Mutex<HashMap<u64, u64>>>;
+/// CDP request id → identifier being evaluated for inline display.
+type PendingInline = Arc<Mutex<HashMap<u64, String>>>;
 
 /// The worker's async main loop. One outstanding CDP connection at a time.
 async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerEvent>) {
@@ -192,6 +207,7 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
     let pending: PendingBreakpoints = Arc::new(Mutex::new(HashMap::new()));
     let pending_props: PendingProperties = Arc::new(Mutex::new(HashMap::new()));
     let pending_watches: PendingWatches = Arc::new(Mutex::new(HashMap::new()));
+    let pending_inline: PendingInline = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
         // Block on a command from the UI. Channel close = shutdown.
@@ -221,6 +237,7 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                     &pending,
                     &pending_props,
                     &pending_watches,
+                    &pending_inline,
                     &evt_tx,
                 )
                 .await;
@@ -258,6 +275,21 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                 };
                 debug!(target: "atomio::bridge", server_id = %server_id, "-> removeBreakpoint");
                 let _ = t.send(&remove_breakpoint(&server_id)).await;
+            }
+            DebuggerCommand::EvaluateInline {
+                ident,
+                call_frame_id,
+            } => {
+                let Some(t) = transport.lock().await.clone() else {
+                    continue;
+                };
+                let req = evaluate_on_call_frame(&call_frame_id, &ident);
+                let req_id = req.id;
+                pending_inline.lock().await.insert(req_id, ident);
+                if let Err(e) = t.send(&req).await {
+                    warn!(target: "atomio::bridge", error = %e, "send inline eval failed");
+                    pending_inline.lock().await.remove(&req_id);
+                }
             }
             DebuggerCommand::EvaluateWatch {
                 tag,
@@ -340,6 +372,7 @@ async fn connect(
     pending: &PendingBreakpoints,
     pending_props: &PendingProperties,
     pending_watches: &PendingWatches,
+    pending_inline: &PendingInline,
     evt_tx: &Sender<DebuggerEvent>,
 ) {
     info!(target: "atomio::bridge", "connect requested");
@@ -407,6 +440,7 @@ async fn connect(
     let pending = pending.clone();
     let pending_props = pending_props.clone();
     let pending_watches = pending_watches.clone();
+    let pending_inline = pending_inline.clone();
     tokio::spawn(async move {
         while let Ok(msg) = events.recv().await {
             match msg {
@@ -500,24 +534,15 @@ async fn connect(
                     // Match against pending watch evaluations.
                     let watch_tag = pending_watches.lock().await.remove(&id);
                     if let Some(tag) = watch_tag {
-                        let result = match result {
-                            Ok(value) => {
-                                if let Some(exc) = value.get("exceptionDetails") {
-                                    let msg = exc
-                                        .get("text")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("evaluation error")
-                                        .to_string();
-                                    Err(msg)
-                                } else if let Some(rv) = value.get("result") {
-                                    Ok(RemoteValue::from_cdp(rv))
-                                } else {
-                                    Err("malformed evaluate response".to_string())
-                                }
-                            }
-                            Err(e) => Err(format!("CDP error {}: {}", e.code, e.message)),
-                        };
+                        let result = decode_evaluate(result);
                         let _ = evt_tx.send(DebuggerEvent::WatchEvaluated { tag, result });
+                        continue;
+                    }
+                    // Match against pending inline-value evaluations.
+                    let inline_ident = pending_inline.lock().await.remove(&id);
+                    if let Some(ident) = inline_ident {
+                        let result = decode_evaluate(result);
+                        let _ = evt_tx.send(DebuggerEvent::InlineEvaluated { ident, result });
                     }
                 }
             }
@@ -529,6 +554,28 @@ async fn connect(
 
 /// Pull `breakpointId` and the first resolved line out of a
 /// `Debugger.setBreakpointByUrl` success response.
+/// Decode a `Debugger.evaluateOnCallFrame` response into a Result. Both
+/// watch and inline-value paths share this shape.
+fn decode_evaluate(result: Result<Value, debugger::cdp::CdpError>) -> Result<RemoteValue, String> {
+    match result {
+        Ok(value) => {
+            if let Some(exc) = value.get("exceptionDetails") {
+                let msg = exc
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("evaluation error")
+                    .to_string();
+                Err(msg)
+            } else if let Some(rv) = value.get("result") {
+                Ok(RemoteValue::from_cdp(rv))
+            } else {
+                Err("malformed evaluate response".to_string())
+            }
+        }
+        Err(e) => Err(format!("CDP error {}: {}", e.code, e.message)),
+    }
+}
+
 fn parse_set_breakpoint_response(value: &Value) -> Option<(String, Option<u32>)> {
     let server_id = value.get("breakpointId")?.as_str()?.to_string();
     let line = value

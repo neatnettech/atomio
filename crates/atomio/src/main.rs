@@ -160,6 +160,124 @@ fn highlight_color(kind: HighlightKind) -> u32 {
 
 const DEFAULT_FG: u32 = theme::SX_PL;
 
+/// JS keywords/operators we don't want as inline-value targets.
+const JS_KEYWORDS: &[&str] = &[
+    "var",
+    "let",
+    "const",
+    "function",
+    "if",
+    "else",
+    "for",
+    "while",
+    "do",
+    "switch",
+    "case",
+    "default",
+    "break",
+    "continue",
+    "return",
+    "throw",
+    "try",
+    "catch",
+    "finally",
+    "new",
+    "delete",
+    "typeof",
+    "instanceof",
+    "in",
+    "of",
+    "void",
+    "yield",
+    "async",
+    "await",
+    "class",
+    "extends",
+    "super",
+    "this",
+    "import",
+    "export",
+    "from",
+    "as",
+    "static",
+    "get",
+    "set",
+    "null",
+    "undefined",
+    "true",
+    "false",
+    "console",
+    "log",
+    "warn",
+    "error",
+];
+
+/// Pull plausible identifier candidates from a single line of source.
+/// Lightweight scanner: matches `[A-Za-z_$][A-Za-z0-9_$]*`, skips string
+/// and line-comment regions, dedupes, drops keywords, caps at 5.
+fn extract_idents(line: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_string: Option<char> = None;
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(quote) = in_string {
+            if c == '\\' {
+                i = (i + 2).min(chars.len());
+                continue;
+            }
+            if c == quote {
+                in_string = None;
+            }
+            i += 1;
+            continue;
+        }
+        if matches!(c, '"' | '\'' | '`') {
+            in_string = Some(c);
+            if !current.is_empty() {
+                push_ident(&mut out, &current);
+                current.clear();
+            }
+            i += 1;
+            continue;
+        }
+        if c == '/' && chars.get(i + 1) == Some(&'/') {
+            break;
+        }
+        let starts_ident = c.is_ascii_alphabetic() || c == '_' || c == '$';
+        let extends_ident = c.is_ascii_digit() && !current.is_empty();
+        if starts_ident || extends_ident {
+            current.push(c);
+        } else if !current.is_empty() {
+            push_ident(&mut out, &current);
+            current.clear();
+        }
+        i += 1;
+    }
+    if !current.is_empty() {
+        push_ident(&mut out, &current);
+    }
+    out.truncate(5);
+    out
+}
+
+fn push_ident(out: &mut Vec<String>, ident: &str) {
+    if ident.len() < 2 {
+        return;
+    }
+    if JS_KEYWORDS.contains(&ident) {
+        return;
+    }
+    if ident.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return;
+    }
+    if !out.iter().any(|s| s == ident) {
+        out.push(ident.to_string());
+    }
+}
+
 /// Map a CDP `RemoteObject.type` string to a syntax colour for the
 /// variables tree. Falls back to TX_2 when unknown.
 fn value_color_for(type_str: &str) -> u32 {
@@ -282,6 +400,9 @@ struct AtomioWindow {
     pending_watch_tags: HashMap<u64, usize>,
     /// Counter for tagging in-flight evaluate requests.
     next_watch_tag: u64,
+    /// Inline values for identifiers on the paused line. Keyed by ident
+    /// name; cleared on resume.
+    inline_values: HashMap<String, Result<inspector::RemoteValue, String>>,
     /// Currently active right-dock pane.
     dock: DockPane,
     /// CDP source URL of the currently displayed buffer (when fetched from
@@ -992,6 +1113,30 @@ impl AtomioWindow {
         cx.notify();
     }
 
+    /// Kick off inline-value evaluation for identifiers on the paused
+    /// line in the currently displayed source. Results stream back via
+    /// `InlineEvaluated` events and populate `inline_values`.
+    fn evaluate_inline_for_paused_line(&mut self) {
+        self.inline_values.clear();
+        let Some(line) = self.paused_line_in_current() else {
+            return;
+        };
+        let Some(stack) = self.call_stack.as_ref() else {
+            return;
+        };
+        let Some(frame) = stack.frames.first() else {
+            return;
+        };
+        let line_text = self.state.buffer.line_text(line as usize);
+        let idents = extract_idents(&line_text);
+        for ident in idents {
+            self.send_debug(DebuggerCommand::EvaluateInline {
+                ident,
+                call_frame_id: frame.id.clone(),
+            });
+        }
+    }
+
     /// Re-evaluate all watch expressions against the current top frame.
     fn evaluate_all_watches(&mut self) {
         let n = self.watches.len();
@@ -1149,6 +1294,7 @@ impl AtomioWindow {
                     // see the call stack + scopes immediately.
                     self.dock = DockPane::Debugger;
                     self.evaluate_all_watches();
+                    self.evaluate_inline_for_paused_line();
                     changed = true;
                 }
                 DebuggerEvent::Resumed => {
@@ -1158,6 +1304,7 @@ impl AtomioWindow {
                     self.expanded.clear();
                     self.pending_props_tags.clear();
                     self.pending_watch_tags.clear();
+                    self.inline_values.clear();
                     // Clear stale watch results; expressions persist.
                     for w in self.watches.iter_mut() {
                         w.last = None;
@@ -1178,6 +1325,10 @@ impl AtomioWindow {
                             w.last = Some(result);
                         }
                     }
+                    changed = true;
+                }
+                DebuggerEvent::InlineEvaluated { ident, result } => {
+                    self.inline_values.insert(ident, result);
                     changed = true;
                 }
             }
@@ -1359,6 +1510,29 @@ impl AtomioWindow {
             }
             if text.is_empty() && caret.is_none() {
                 row = row.child(div().child(" "));
+            }
+
+            // Inline value pills on the paused line.
+            if is_paused_here && !self.inline_values.is_empty() {
+                for ident in extract_idents(&text) {
+                    if let Some(result) = self.inline_values.get(&ident) {
+                        let (display, color) = match result {
+                            Ok(rv) => (rv.display.clone(), value_color_for(rv.type_str.as_str())),
+                            Err(_) => continue, // skip out-of-scope idents
+                        };
+                        row = row.child(
+                            div()
+                                .ml_2()
+                                .px_2()
+                                .py(px(0.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(theme::BG_4))
+                                .text_xs()
+                                .text_color(rgb(color))
+                                .child(format!("{ident} = {display}")),
+                        );
+                    }
+                }
             }
 
             let row_bg = if is_paused_here {
@@ -2302,6 +2476,7 @@ fn main() {
                         watches: WatchList::new(),
                         pending_watch_tags: HashMap::new(),
                         next_watch_tag: 0,
+                        inline_values: HashMap::new(),
                         dock: DockPane::Console,
                         current_url: None,
                     })
@@ -2335,6 +2510,35 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_idents_basic() {
+        let v = extract_idents("const total = items.reduce((a, b) => a + b.price, 0);");
+        assert!(v.contains(&"total".to_string()));
+        assert!(v.contains(&"items".to_string()));
+        assert!(!v.contains(&"const".to_string()));
+        assert!(!v.contains(&"a".to_string())); // single-char
+    }
+
+    #[test]
+    fn extract_idents_skips_strings() {
+        let v = extract_idents(r#"console.log("hello world", x);"#);
+        assert!(!v.iter().any(|s| s == "hello"));
+        assert!(!v.iter().any(|s| s == "world"));
+    }
+
+    #[test]
+    fn extract_idents_caps_to_five() {
+        let v = extract_idents("aa bb cc dd ee ff gg hh");
+        assert_eq!(v.len(), 5);
+    }
+
+    #[test]
+    fn extract_idents_skips_comments() {
+        let v = extract_idents("foo // shouldNotAppear");
+        assert!(v.contains(&"foo".to_string()));
+        assert!(!v.iter().any(|s| s == "shouldNotAppear"));
+    }
 
     fn text_run(text: &str, fg: u32, selected: bool) -> Run {
         Run::Text {
