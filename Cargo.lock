@@ -430,6 +430,7 @@ dependencies = [
  "dirs 5.0.1",
  "editor_core",
  "gpui",
+ "inspector",
  "language",
  "rfd",
  "serde_json",
