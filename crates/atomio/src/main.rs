@@ -25,7 +25,9 @@ use gpui::{
     FocusHandle, Focusable, KeyBinding, KeyDownEvent, Render, SharedString, TitlebarOptions,
     Window, WindowBackgroundAppearance, WindowBounds, WindowOptions,
 };
+use inspector::CallStack;
 use language::{highlight, HighlightKind, Language, Span};
+use tracing::debug;
 
 actions!(
     atomio,
@@ -239,7 +241,8 @@ struct AtomioWindow {
     paused: bool,
     /// Last paused-frames payload (raw CDP `callFrames`). Decoded on demand
     /// when rendering the call stack.
-    paused_frames: Option<serde_json::Value>,
+    /// Decoded call stack from the most recent `Debugger.paused` event.
+    call_stack: Option<CallStack>,
     /// Currently active right-dock pane.
     dock: DockPane,
     /// CDP source URL of the currently displayed buffer (when fetched from
@@ -752,7 +755,7 @@ impl AtomioWindow {
         }
         self.breakpoints.clear();
         self.paused = false;
-        self.paused_frames = None;
+        self.call_stack = None;
         cx.notify();
     }
 
@@ -837,17 +840,13 @@ impl AtomioWindow {
     }
 
     /// Zero-based line in the currently displayed source where the runtime
-    /// is paused, if any. Resolves `paused_frames[0].location.scriptId` to
-    /// its URL via the script registry and matches against `current_url`.
+    /// is paused, if any. Resolves the top frame's `script_id` to its URL
+    /// via the script registry and matches against `current_url`.
     fn paused_line_in_current(&self) -> Option<u32> {
-        let frames = self.paused_frames.as_ref()?;
-        let frame = frames.as_array()?.first()?;
-        let loc = frame.get("location")?;
-        let script_id = loc.get("scriptId")?.as_str()?;
-        let line = loc.get("lineNumber")?.as_u64()? as u32;
-        let url = self.scripts.get(script_id).map(|s| s.url.clone())?;
+        let frame = self.call_stack.as_ref()?.frames.first()?;
+        let url = self.scripts.get(&frame.script_id).map(|s| s.url.clone())?;
         if Some(&url) == self.current_url.as_ref() {
-            Some(line)
+            Some(frame.line)
         } else {
             None
         }
@@ -932,16 +931,27 @@ impl AtomioWindow {
                     }
                     changed = true;
                 }
-                DebuggerEvent::Paused { reason, frames } => {
+                DebuggerEvent::Paused { reason, call_stack } => {
                     self.paused = true;
-                    self.paused_frames = Some(frames);
+                    self.call_stack = Some(call_stack);
                     self.status = format!("paused ({reason})").into();
+                    // Auto-switch dock to Debugger pane on pause so users
+                    // see the call stack + scopes immediately.
+                    self.dock = DockPane::Debugger;
                     changed = true;
                 }
                 DebuggerEvent::Resumed => {
                     self.paused = false;
-                    self.paused_frames = None;
+                    self.call_stack = None;
                     self.status = "resumed".into();
+                    changed = true;
+                }
+                DebuggerEvent::Properties { tag, properties } => {
+                    debug!(target: "atomio", tag, count = properties.len(), "properties");
+                    let _ = (tag, properties);
+                    // Property expansion UI lands in a follow-up PR; for
+                    // now we accept and discard so the bridge match is
+                    // exhaustive.
                     changed = true;
                 }
             }
@@ -1229,20 +1239,111 @@ impl AtomioWindow {
                 "● running".to_string()
             });
 
-        let placeholder_body = div()
-            .flex_1()
-            .px_3()
-            .py_4()
-            .text_xs()
-            .text_color(rgb(theme::TX_4))
-            .child("Variables, call stack, and watch expressions ship in v0.3.");
+        let body = self.render_debugger_lower();
 
         div()
             .flex()
             .flex_col()
             .child(bar)
             .child(state_line)
-            .child(placeholder_body)
+            .child(body)
+    }
+
+    /// Lower portion of the Debugger pane: call stack list + scopes for
+    /// the selected frame. Renders a placeholder when not paused. Variable
+    /// expansion (lazy property fetch) ships in a follow-up PR.
+    fn render_debugger_lower(&self) -> gpui::Div {
+        let Some(stack) = self.call_stack.as_ref() else {
+            return div()
+                .flex_1()
+                .px_3()
+                .py_4()
+                .text_xs()
+                .text_color(rgb(theme::TX_4))
+                .child("Hit a breakpoint to see the call stack and scopes.");
+        };
+
+        let mut frames_section = div()
+            .flex()
+            .flex_col()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(rgb(theme::LINE_1))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::TX_3))
+                    .pb_1()
+                    .child(format!("Call stack — {} frames", stack.frames.len())),
+            );
+        for (i, f) in stack.frames.iter().enumerate() {
+            let name = if f.function_name.is_empty() {
+                "(anonymous)"
+            } else {
+                f.function_name.as_str()
+            };
+            let url = self
+                .scripts
+                .get(&f.script_id)
+                .map(|s| s.url.as_str())
+                .unwrap_or(&f.script_id);
+            // Show only file basename for compactness.
+            let basename = url.rsplit_once('/').map(|(_, b)| b).unwrap_or(url);
+            let row_color = if i == 0 { theme::TX_1 } else { theme::TX_2 };
+            frames_section = frames_section.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(rgb(row_color))
+                    .py_1()
+                    .child(div().child(name.to_string()))
+                    .child(div().text_color(rgb(theme::TX_4)).child(format!(
+                        "{}:{}",
+                        basename,
+                        f.line + 1
+                    ))),
+            );
+        }
+
+        // Scopes for the top frame.
+        let mut scopes_section = div().flex().flex_col().px_3().py_2();
+        if let Some(top) = stack.frames.first() {
+            scopes_section = scopes_section.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::TX_3))
+                    .pb_1()
+                    .child(format!("Scopes ({})", top.scopes.len())),
+            );
+            for scope in &top.scopes {
+                let label = scope.kind.label();
+                scopes_section = scopes_section.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_between()
+                        .text_xs()
+                        .text_color(rgb(theme::TX_2))
+                        .py_1()
+                        .child(div().child(format!("▸ {label}")))
+                        .child(
+                            div()
+                                .text_color(rgb(theme::TX_4))
+                                .child(scope.name.clone().unwrap_or_default()),
+                        ),
+                );
+            }
+        }
+
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .child(frames_section)
+            .child(scopes_section)
     }
 
     /// Build one step-control button. Disabled-looking when `enabled` is
@@ -1791,7 +1892,7 @@ fn main() {
                         scripts: ScriptRegistry::new(),
                         breakpoints: BreakpointRegistry::new(),
                         paused: false,
-                        paused_frames: None,
+                        call_stack: None,
                         dock: DockPane::Console,
                         current_url: None,
                     })

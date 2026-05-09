@@ -18,11 +18,13 @@ use console::{entry_from_console_api_called, LogLevel, SourceLocation};
 use debugger::breakpoints::BreakpointId;
 use debugger::cdp::{
     debugger_enable, debugger_pause, debugger_resume, debugger_step_into, debugger_step_out,
-    debugger_step_over, remove_breakpoint, runtime_enable, set_breakpoint_by_url, CdpMessage,
+    debugger_step_over, get_properties, remove_breakpoint, runtime_enable, set_breakpoint_by_url,
+    CdpMessage,
 };
 use debugger::metro::{fetch_source, scan_localhost};
 use debugger::scripts::Script;
 use debugger::transport::CdpTransport;
+use inspector::{CallStack, Property};
 use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -59,6 +61,14 @@ pub enum DebuggerCommand {
     RemoveBreakpoint {
         server_id: String,
     },
+    /// Fetch properties of a CDP `RemoteObject`. `tag` is an opaque token
+    /// the UI uses to match the response to the right scope/property
+    /// expansion (returned in [`DebuggerEvent::Properties`]).
+    GetProperties {
+        tag: u64,
+        object_id: String,
+        own_properties: bool,
+    },
     /// Step controls -- map directly to CDP `Debugger.*` methods.
     Resume,
     StepOver,
@@ -94,11 +104,16 @@ pub enum DebuggerEvent {
     },
     /// `Debugger.breakpointResolved` event -- runtime relocated breakpoint.
     BreakpointResolved { server_id: String, line: u32 },
-    /// `Debugger.paused` -- runtime hit a breakpoint or stepped. `frames`
-    /// is the raw call-frame array; deeper decoding happens upstream.
-    Paused { reason: String, frames: Value },
+    /// `Debugger.paused` -- runtime hit a breakpoint or stepped. The raw
+    /// call-frame array is decoded into a typed [`CallStack`].
+    Paused {
+        reason: String,
+        call_stack: CallStack,
+    },
     /// `Debugger.resumed` -- execution continued.
     Resumed,
+    /// Result of [`DebuggerCommand::GetProperties`].
+    Properties { tag: u64, properties: Vec<Property> },
 }
 
 /// Coarse connection state. Detailed CDP state lives in the worker.
@@ -151,6 +166,9 @@ pub fn spawn() -> DebuggerBridge {
 /// Populated when we send `Debugger.setBreakpointByUrl`; drained when the
 /// matching response arrives in the event forwarder.
 type PendingBreakpoints = Arc<Mutex<HashMap<u64, BreakpointId>>>;
+/// CDP request id → caller-supplied tag awaiting a `Runtime.getProperties`
+/// response.
+type PendingProperties = Arc<Mutex<HashMap<u64, u64>>>;
 
 /// The worker's async main loop. One outstanding CDP connection at a time.
 async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerEvent>) {
@@ -158,6 +176,7 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
     // both reach it. `None` until Connect succeeds; cleared on Disconnect.
     let transport: Arc<Mutex<Option<Arc<CdpTransport>>>> = Arc::new(Mutex::new(None));
     let pending: PendingBreakpoints = Arc::new(Mutex::new(HashMap::new()));
+    let pending_props: PendingProperties = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
         // Block on a command from the UI. Channel close = shutdown.
@@ -182,7 +201,7 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                 });
             }
             DebuggerCommand::Connect => {
-                connect(&transport, &pending, &evt_tx).await;
+                connect(&transport, &pending, &pending_props, &evt_tx).await;
             }
             DebuggerCommand::SetBreakpoint {
                 local,
@@ -218,6 +237,29 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                 debug!(target: "atomio::bridge", server_id = %server_id, "-> removeBreakpoint");
                 let _ = t.send(&remove_breakpoint(&server_id)).await;
             }
+            DebuggerCommand::GetProperties {
+                tag,
+                object_id,
+                own_properties,
+            } => {
+                let Some(t) = transport.lock().await.clone() else {
+                    continue;
+                };
+                let req = get_properties(&object_id, own_properties);
+                let req_id = req.id;
+                debug!(
+                    target: "atomio::bridge",
+                    tag,
+                    req_id,
+                    object_id = %object_id,
+                    "-> getProperties"
+                );
+                pending_props.lock().await.insert(req_id, tag);
+                if let Err(e) = t.send(&req).await {
+                    warn!(target: "atomio::bridge", error = %e, "send getProperties failed");
+                    pending_props.lock().await.remove(&req_id);
+                }
+            }
             DebuggerCommand::Resume => send_no_args(&transport, debugger_resume(), "resume").await,
             DebuggerCommand::StepOver => {
                 send_no_args(&transport, debugger_step_over(), "stepOver").await
@@ -251,6 +293,7 @@ async fn send_no_args(
 async fn connect(
     transport_slot: &Arc<Mutex<Option<Arc<CdpTransport>>>>,
     pending: &PendingBreakpoints,
+    pending_props: &PendingProperties,
     evt_tx: &Sender<DebuggerEvent>,
 ) {
     info!(target: "atomio::bridge", "connect requested");
@@ -316,6 +359,7 @@ async fn connect(
     let mut events = transport.subscribe();
     let evt_tx = evt_tx.clone();
     let pending = pending.clone();
+    let pending_props = pending_props.clone();
     tokio::spawn(async move {
         while let Ok(msg) = events.recv().await {
             match msg {
@@ -352,7 +396,8 @@ async fn connect(
                             .get("callFrames")
                             .cloned()
                             .unwrap_or(Value::Array(vec![]));
-                        let _ = evt_tx.send(DebuggerEvent::Paused { reason, frames });
+                        let call_stack = CallStack::from_cdp(&frames);
+                        let _ = evt_tx.send(DebuggerEvent::Paused { reason, call_stack });
                     }
                     "Debugger.resumed" => {
                         let _ = evt_tx.send(DebuggerEvent::Resumed);
@@ -361,8 +406,8 @@ async fn connect(
                 },
                 CdpMessage::Response { id, result } => {
                     // Match against pending breakpoint requests.
-                    let local = pending.lock().await.remove(&id);
-                    if let Some(local) = local {
+                    let local_bp = pending.lock().await.remove(&id);
+                    if let Some(local) = local_bp {
                         match result {
                             Ok(value) => {
                                 if let Some((server_id, line)) =
@@ -381,6 +426,25 @@ async fn connect(
                                     code = e.code,
                                     msg = %e.message,
                                     "setBreakpointByUrl error"
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    // Match against pending getProperties requests.
+                    let prop_tag = pending_props.lock().await.remove(&id);
+                    if let Some(tag) = prop_tag {
+                        match result {
+                            Ok(value) => {
+                                let properties = Property::parse_response(&value);
+                                let _ = evt_tx.send(DebuggerEvent::Properties { tag, properties });
+                            }
+                            Err(e) => {
+                                warn!(
+                                    target: "atomio::bridge",
+                                    code = e.code,
+                                    msg = %e.message,
+                                    "getProperties error"
                                 );
                             }
                         }
