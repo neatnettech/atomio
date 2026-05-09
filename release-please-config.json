@@ -29,6 +29,11 @@
       "package-name": "console",
       "skip-github-release": true,
       "changelog-path": "../../CHANGELOG.md"
+    },
+    "crates/inspector": {
+      "package-name": "inspector",
+      "skip-github-release": true,
+      "changelog-path": "../../CHANGELOG.md"
     }
   }
 }

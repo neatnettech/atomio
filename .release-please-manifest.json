@@ -3,5 +3,6 @@
   "crates/editor_core": "0.1.0",
   "crates/language": "0.1.0",
   "crates/debugger": "0.1.0",
-  "crates/console": "0.1.0"
+  "crates/console": "0.1.0",
+  "crates/inspector": "0.1.0"
 }
