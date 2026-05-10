@@ -83,6 +83,7 @@ actions!(
         ComponentsLoadDemo,
         ComponentsClear,
         ProfilerRefresh,
+        SimulatorCapture,
     ]
 );
 
@@ -475,6 +476,11 @@ struct AtomioWindow {
     selected_node: Option<NodeId>,
     /// Most recent `Performance.getMetrics` snapshot.
     metrics: Vec<(String, f64)>,
+    /// Filesystem path of the last decoded screenshot. The bytes live on
+    /// disk so gpui's image loader can pick them up via `img(path)`.
+    screenshot_path: Option<PathBuf>,
+    /// Capture count for the simulator pane label.
+    screenshot_count: u64,
     /// Currently active right-dock pane.
     dock: DockPane,
     /// CDP source URL of the currently displayed buffer (when fetched from
@@ -516,6 +522,7 @@ fn build_command_registry() -> CommandRegistry {
     reg.register("Components: Load Demo Tree", "components_load_demo");
     reg.register("Components: Clear", "components_clear");
     reg.register("Profiler: Refresh Metrics", "profiler_refresh");
+    reg.register("Simulator: Capture Screenshot", "simulator_capture");
     reg
 }
 
@@ -975,6 +982,7 @@ impl AtomioWindow {
             "components_load_demo" => self.on_components_load_demo(&ComponentsLoadDemo, window, cx),
             "components_clear" => self.on_components_clear(&ComponentsClear, window, cx),
             "profiler_refresh" => self.on_profiler_refresh(&ProfilerRefresh, window, cx),
+            "simulator_capture" => self.on_simulator_capture(&SimulatorCapture, window, cx),
             _ => {}
         }
     }
@@ -1042,6 +1050,8 @@ impl AtomioWindow {
         self.components.clear();
         self.selected_node = None;
         self.metrics.clear();
+        self.screenshot_path = None;
+        self.screenshot_count = 0;
         cx.notify();
     }
 
@@ -1159,6 +1169,17 @@ impl AtomioWindow {
         self.send_debug(DebuggerCommand::GetPerformanceMetrics);
         self.dock = DockPane::Profiler;
         self.status = "fetching metrics...".into();
+        cx.notify();
+    }
+    fn on_simulator_capture(
+        &mut self,
+        _: &SimulatorCapture,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_debug(DebuggerCommand::CaptureScreenshot);
+        self.dock = DockPane::Simulator;
+        self.status = "capturing screenshot...".into();
         cx.notify();
     }
 
@@ -1479,6 +1500,36 @@ impl AtomioWindow {
                     self.metrics = metrics;
                     changed = true;
                 }
+                DebuggerEvent::ScreenshotCaptured { data_base64 } => {
+                    use base64::Engine;
+                    match base64::engine::general_purpose::STANDARD.decode(data_base64) {
+                        Ok(bytes) => {
+                            self.screenshot_count += 1;
+                            let path = screenshot_path_for(self.screenshot_count);
+                            if let Some(parent) = path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            match std::fs::write(&path, &bytes) {
+                                Ok(_) => {
+                                    self.status = format!(
+                                        "screenshot {} ({} bytes)",
+                                        self.screenshot_count,
+                                        bytes.len()
+                                    )
+                                    .into();
+                                    self.screenshot_path = Some(path);
+                                }
+                                Err(e) => {
+                                    self.status = format!("write screenshot: {e}").into();
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("decode screenshot: {e}").into();
+                        }
+                    }
+                    changed = true;
+                }
                 DebuggerEvent::NetworkEvent { method, params } => {
                     match method.as_str() {
                         "Network.requestWillBeSent" => {
@@ -1743,7 +1794,7 @@ impl AtomioWindow {
             DockPane::Console => self.render_console_body(),
             DockPane::Files => placeholder("File tree ships in v0.6"),
             DockPane::Debugger => self.render_debugger_body(cx),
-            DockPane::Simulator => placeholder("Simulator pane ships in v0.5"),
+            DockPane::Simulator => self.render_simulator_body(cx),
             DockPane::Components => self.render_components_body(cx),
             DockPane::Profiler => self.render_profiler_body(cx),
             DockPane::Network => self.render_network_body(cx),
@@ -2308,6 +2359,81 @@ impl AtomioWindow {
 
     /// Console body (entries list). Used by [`render_dock`] when console
     /// pane is active.
+    /// Simulator pane body. Capture button + phone-frame border that
+    /// renders the most recent screenshot via gpui's image loader. Live
+    /// streaming + device picker land in a follow-up PR.
+    fn render_simulator_body(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .py_1()
+            .text_xs()
+            .text_color(rgb(theme::TX_3))
+            .child(div().child(format!(
+                "frames: {}{}",
+                self.screenshot_count,
+                if self.screenshot_path.is_some() {
+                    ""
+                } else {
+                    " (no capture yet)"
+                }
+            )))
+            .child(
+                div()
+                    .id(SharedString::from("sim-capture"))
+                    .px_2()
+                    .py(px(2.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(theme::BG_3))
+                    .text_color(rgb(theme::TX_1))
+                    .child("◉ Capture")
+                    .on_click(cx.listener(|this, _ev, win, cx| {
+                        this.on_simulator_capture(&SimulatorCapture, win, cx);
+                    })),
+            );
+
+        // Phone-frame container, sized roughly 300x600 device aspect.
+        let mut frame = div()
+            .mt_4()
+            .mx_auto()
+            .w(px(280.0))
+            .h(px(560.0))
+            .rounded(px(28.0))
+            .bg(rgb(theme::BG_0))
+            .border_2()
+            .border_color(rgb(theme::LINE_3))
+            .flex()
+            .items_center()
+            .justify_center();
+        if let Some(path) = self.screenshot_path.as_ref() {
+            frame = frame.child(
+                gpui::img(path.clone())
+                    .w(px(260.0))
+                    .h(px(540.0))
+                    .rounded(px(20.0)),
+            );
+        } else {
+            frame = frame.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::TX_4))
+                    .child("press Capture to fetch a frame"),
+            );
+        }
+
+        div().flex().flex_col().child(header).child(frame).child(
+            div()
+                .px_3()
+                .pt_2()
+                .text_xs()
+                .text_color(rgb(theme::TX_4))
+                .child("uses Page.captureScreenshot · live stream lands in v0.5 follow-up"),
+        )
+    }
+
     /// Profiler pane body. Refresh button + metric rows. Bar widths are
     /// proportional to the largest value in the snapshot for quick visual
     /// comparison; deeper sampling/flame graph lands in a follow-up PR.
@@ -2704,6 +2830,7 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_components_load_demo))
             .on_action(cx.listener(Self::on_components_clear))
             .on_action(cx.listener(Self::on_profiler_refresh))
+            .on_action(cx.listener(Self::on_simulator_capture))
             .on_key_down(cx.listener(Self::on_key_down))
             .flex()
             .flex_col()
@@ -2865,6 +2992,15 @@ fn load_initial_buffer() -> Buffer {
 /// Resolve the path where atomio's diagnostic log lives, creating parent
 /// directories if needed. Mirrors the macOS convention
 /// `~/Library/Logs/atomio/atomio.log`.
+/// Path where the simulator pane writes captured PNG frames. Filename
+/// includes the count so gpui's image cache reloads (it keys by path).
+fn screenshot_path_for(seq: u64) -> PathBuf {
+    let base = dirs::cache_dir()
+        .map(|c| c.join("atomio").join("screenshots"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/atomio/screenshots"));
+    base.join(format!("frame-{seq}.png"))
+}
+
 fn log_file_path() -> PathBuf {
     let base = dirs::home_dir()
         .map(|h| h.join("Library").join("Logs").join("atomio"))
@@ -3019,6 +3155,8 @@ fn main() {
                         components: ComponentTree::new(),
                         selected_node: None,
                         metrics: Vec::new(),
+                        screenshot_path: None,
+                        screenshot_count: 0,
                         dock: DockPane::Console,
                         current_url: None,
                     })
