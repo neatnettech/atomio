@@ -433,6 +433,7 @@ dependencies = [
  "inspector",
  "language",
  "network",
+ "react_tree",
  "rfd",
  "serde_json",
  "tokio",
