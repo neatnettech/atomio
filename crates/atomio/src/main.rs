@@ -29,6 +29,7 @@ use gpui::{
 use inspector::{CallStack, Property, WatchList};
 use language::{highlight, HighlightKind, Language, Span};
 use network::{NetworkRegistry, RequestState, ResourceKind, WsDirection};
+use react_tree::{ComponentTree, NodeId};
 use tracing::debug;
 
 actions!(
@@ -79,6 +80,8 @@ actions!(
         ShowConsole,
         ShowNetwork,
         ClearNetwork,
+        ComponentsLoadDemo,
+        ComponentsClear,
     ]
 );
 
@@ -320,6 +323,22 @@ fn status_color(status: u16) -> u32 {
     }
 }
 
+/// Compact JSON preview for inline rendering. Caps at ~120 chars.
+fn json_preview(v: &serde_json::Value) -> String {
+    let s = match v {
+        serde_json::Value::Object(m) if m.is_empty() => "{}".to_string(),
+        serde_json::Value::Array(a) if a.is_empty() => "[]".to_string(),
+        _ => v.to_string(),
+    };
+    if s.len() > 120 {
+        let mut t: String = s.chars().take(117).collect();
+        t.push_str("...");
+        t
+    } else {
+        s
+    }
+}
+
 fn url_basename(url: &str) -> String {
     let trimmed = url.split('?').next().unwrap_or(url);
     if let Some(idx) = trimmed.rfind('/') {
@@ -449,6 +468,10 @@ struct AtomioWindow {
     network: NetworkRegistry,
     /// Selected request id in the network pane.
     selected_request: Option<String>,
+    /// React component tree.
+    components: ComponentTree,
+    /// Selected node in the components pane.
+    selected_node: Option<NodeId>,
     /// Currently active right-dock pane.
     dock: DockPane,
     /// CDP source URL of the currently displayed buffer (when fetched from
@@ -487,6 +510,8 @@ fn build_command_registry() -> CommandRegistry {
     reg.register("View: Console Pane", "show_console");
     reg.register("View: Network Pane", "show_network");
     reg.register("Network: Clear", "clear_network");
+    reg.register("Components: Load Demo Tree", "components_load_demo");
+    reg.register("Components: Clear", "components_clear");
     reg
 }
 
@@ -943,6 +968,8 @@ impl AtomioWindow {
             "show_console" => self.on_show_console(&ShowConsole, window, cx),
             "show_network" => self.on_show_network(&ShowNetwork, window, cx),
             "clear_network" => self.on_clear_network(&ClearNetwork, window, cx),
+            "components_load_demo" => self.on_components_load_demo(&ComponentsLoadDemo, window, cx),
+            "components_clear" => self.on_components_clear(&ComponentsClear, window, cx),
             _ => {}
         }
     }
@@ -1007,6 +1034,8 @@ impl AtomioWindow {
         self.pending_props_tags.clear();
         self.network.clear();
         self.selected_request = None;
+        self.components.clear();
+        self.selected_node = None;
         cx.notify();
     }
 
@@ -1075,6 +1104,49 @@ impl AtomioWindow {
     fn on_clear_network(&mut self, _: &ClearNetwork, _: &mut Window, cx: &mut Context<Self>) {
         self.network.clear();
         self.selected_request = None;
+        cx.notify();
+    }
+    fn on_components_load_demo(
+        &mut self,
+        _: &ComponentsLoadDemo,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Until React DevTools backend protocol decoding lands, this seeds
+        // a representative tree so users can see the Components pane loop.
+        let snap = serde_json::json!([
+            {
+                "id": "1",
+                "name": "App",
+                "props": {"children": "<...>" },
+                "state": {},
+                "children": [
+                    {
+                        "id": "2",
+                        "name": "NavigationContainer",
+                        "props": {"theme": "dark"},
+                        "children": [
+                            {
+                                "id": "3",
+                                "name": "TabNavigator",
+                                "children": [
+                                    {"id": "4", "name": "HomeScreen", "props": {"route": "/home"}},
+                                    {"id": "5", "name": "CartScreen", "props": {"route": "/cart"}, "state": {"count": 3}}
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]);
+        self.components.seed_from_devtools_snapshot(&snap);
+        self.dock = DockPane::Components;
+        self.status = "loaded demo component tree".into();
+        cx.notify();
+    }
+    fn on_components_clear(&mut self, _: &ComponentsClear, _: &mut Window, cx: &mut Context<Self>) {
+        self.components.clear();
+        self.selected_node = None;
         cx.notify();
     }
 
@@ -1656,7 +1728,7 @@ impl AtomioWindow {
             DockPane::Files => placeholder("File tree ships in v0.6"),
             DockPane::Debugger => self.render_debugger_body(cx),
             DockPane::Simulator => placeholder("Simulator pane ships in v0.5"),
-            DockPane::Components => placeholder("React component tree ships in v0.4"),
+            DockPane::Components => self.render_components_body(cx),
             DockPane::Profiler => placeholder("Profiler ships in v0.5"),
             DockPane::Network => self.render_network_body(cx),
         };
@@ -2220,6 +2292,104 @@ impl AtomioWindow {
 
     /// Console body (entries list). Used by [`render_dock`] when console
     /// pane is active.
+    /// Components pane body: indented DFS render of the component tree
+    /// + props/state strip for the selected node.
+    fn render_components_body(&self, cx: &mut Context<Self>) -> gpui::Div {
+        if self.components.is_empty() {
+            return div()
+                .flex_1()
+                .px_3()
+                .py_4()
+                .text_xs()
+                .text_color(rgb(theme::TX_4))
+                .child("(empty — palette: Components: Load Demo Tree)");
+        }
+
+        let header = div()
+            .px_3()
+            .py_1()
+            .text_xs()
+            .text_color(rgb(theme::TX_3))
+            .child(format!("{} components", self.components.len()));
+
+        let mut list = div().flex().flex_col();
+        let flat = self.components.flatten();
+        for (id, depth) in flat {
+            let Some(node) = self.components.get(&id) else {
+                continue;
+            };
+            let selected = self.selected_node.as_deref() == Some(&id);
+            let bg = if selected { theme::BG_3 } else { theme::BG_2 };
+            let id_for_click = id.clone();
+            let key_str = node
+                .key
+                .as_deref()
+                .map(|k| format!(" key={k}"))
+                .unwrap_or_default();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("comp-{id}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .text_xs()
+                    .px_3()
+                    .py(px(2.0))
+                    .pl(px((12 + depth * 12) as f32))
+                    .bg(rgb(bg))
+                    .child(
+                        div()
+                            .text_color(rgb(theme::SX_COMP))
+                            .child(format!("<{}>", node.name)),
+                    )
+                    .child(div().ml_2().text_color(rgb(theme::TX_4)).child(key_str))
+                    .on_click(cx.listener(move |this, _ev, _win, cx| {
+                        this.selected_node = Some(id_for_click.clone());
+                        cx.notify();
+                    })),
+            );
+        }
+
+        let detail = self.selected_node.as_deref().and_then(|id| {
+            self.components.get(id).map(|node| {
+                let mut d = div()
+                    .flex()
+                    .flex_col()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(rgb(theme::LINE_1))
+                    .text_xs()
+                    .text_color(rgb(theme::TX_2))
+                    .child(
+                        div()
+                            .text_color(rgb(theme::TX_3))
+                            .pb_1()
+                            .child(format!("<{}>", node.name)),
+                    );
+                d = d.child(div().text_color(rgb(theme::TX_3)).pt_1().child("Props"));
+                d = d.child(
+                    div()
+                        .text_color(rgb(theme::TX_2))
+                        .child(json_preview(&node.props)),
+                );
+                d = d.child(div().text_color(rgb(theme::TX_3)).pt_1().child("State"));
+                d = d.child(
+                    div()
+                        .text_color(rgb(theme::TX_2))
+                        .child(json_preview(&node.state)),
+                );
+                d
+            })
+        });
+
+        let mut wrap = div().flex().flex_col().child(header).child(list);
+        if let Some(d) = detail {
+            wrap = wrap.child(d);
+        }
+        wrap
+    }
+
     fn render_console_body(&self) -> gpui::Div {
         let entries: Vec<_> = self
             .console
@@ -2431,6 +2601,8 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_show_console))
             .on_action(cx.listener(Self::on_show_network))
             .on_action(cx.listener(Self::on_clear_network))
+            .on_action(cx.listener(Self::on_components_load_demo))
+            .on_action(cx.listener(Self::on_components_clear))
             .on_key_down(cx.listener(Self::on_key_down))
             .flex()
             .flex_col()
@@ -2743,6 +2915,8 @@ fn main() {
                         inline_values: HashMap::new(),
                         network: NetworkRegistry::new(),
                         selected_request: None,
+                        components: ComponentTree::new(),
+                        selected_node: None,
                         dock: DockPane::Console,
                         current_url: None,
                     })
