@@ -82,6 +82,7 @@ actions!(
         ClearNetwork,
         ComponentsLoadDemo,
         ComponentsClear,
+        ProfilerRefresh,
     ]
 );
 
@@ -472,6 +473,8 @@ struct AtomioWindow {
     components: ComponentTree,
     /// Selected node in the components pane.
     selected_node: Option<NodeId>,
+    /// Most recent `Performance.getMetrics` snapshot.
+    metrics: Vec<(String, f64)>,
     /// Currently active right-dock pane.
     dock: DockPane,
     /// CDP source URL of the currently displayed buffer (when fetched from
@@ -512,6 +515,7 @@ fn build_command_registry() -> CommandRegistry {
     reg.register("Network: Clear", "clear_network");
     reg.register("Components: Load Demo Tree", "components_load_demo");
     reg.register("Components: Clear", "components_clear");
+    reg.register("Profiler: Refresh Metrics", "profiler_refresh");
     reg
 }
 
@@ -970,6 +974,7 @@ impl AtomioWindow {
             "clear_network" => self.on_clear_network(&ClearNetwork, window, cx),
             "components_load_demo" => self.on_components_load_demo(&ComponentsLoadDemo, window, cx),
             "components_clear" => self.on_components_clear(&ComponentsClear, window, cx),
+            "profiler_refresh" => self.on_profiler_refresh(&ProfilerRefresh, window, cx),
             _ => {}
         }
     }
@@ -1036,6 +1041,7 @@ impl AtomioWindow {
         self.selected_request = None;
         self.components.clear();
         self.selected_node = None;
+        self.metrics.clear();
         cx.notify();
     }
 
@@ -1147,6 +1153,12 @@ impl AtomioWindow {
     fn on_components_clear(&mut self, _: &ComponentsClear, _: &mut Window, cx: &mut Context<Self>) {
         self.components.clear();
         self.selected_node = None;
+        cx.notify();
+    }
+    fn on_profiler_refresh(&mut self, _: &ProfilerRefresh, _: &mut Window, cx: &mut Context<Self>) {
+        self.send_debug(DebuggerCommand::GetPerformanceMetrics);
+        self.dock = DockPane::Profiler;
+        self.status = "fetching metrics...".into();
         cx.notify();
     }
 
@@ -1463,6 +1475,10 @@ impl AtomioWindow {
                     self.inline_values.insert(ident, result);
                     changed = true;
                 }
+                DebuggerEvent::PerformanceMetrics(metrics) => {
+                    self.metrics = metrics;
+                    changed = true;
+                }
                 DebuggerEvent::NetworkEvent { method, params } => {
                     match method.as_str() {
                         "Network.requestWillBeSent" => {
@@ -1729,7 +1745,7 @@ impl AtomioWindow {
             DockPane::Debugger => self.render_debugger_body(cx),
             DockPane::Simulator => placeholder("Simulator pane ships in v0.5"),
             DockPane::Components => self.render_components_body(cx),
-            DockPane::Profiler => placeholder("Profiler ships in v0.5"),
+            DockPane::Profiler => self.render_profiler_body(cx),
             DockPane::Network => self.render_network_body(cx),
         };
 
@@ -2292,6 +2308,90 @@ impl AtomioWindow {
 
     /// Console body (entries list). Used by [`render_dock`] when console
     /// pane is active.
+    /// Profiler pane body. Refresh button + metric rows. Bar widths are
+    /// proportional to the largest value in the snapshot for quick visual
+    /// comparison; deeper sampling/flame graph lands in a follow-up PR.
+    fn render_profiler_body(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let max = self.metrics.iter().map(|(_, v)| *v).fold(0.0f64, f64::max);
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .py_1()
+            .text_xs()
+            .text_color(rgb(theme::TX_3))
+            .child(div().child(format!("{} metrics", self.metrics.len())))
+            .child(
+                div()
+                    .id(SharedString::from("profiler-refresh"))
+                    .px_2()
+                    .py(px(2.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(theme::BG_3))
+                    .text_color(rgb(theme::TX_1))
+                    .child("⟳ Refresh")
+                    .on_click(cx.listener(|this, _ev, win, cx| {
+                        this.on_profiler_refresh(&ProfilerRefresh, win, cx);
+                    })),
+            );
+
+        if self.metrics.is_empty() {
+            return div().flex().flex_col().child(header).child(
+                div()
+                    .px_3()
+                    .py_4()
+                    .text_xs()
+                    .text_color(rgb(theme::TX_4))
+                    .child("(no snapshot — palette: Profiler: Refresh Metrics)"),
+            );
+        }
+
+        let mut list = div().flex().flex_col().px_3().py_1();
+        for (name, value) in &self.metrics {
+            let frac = if max > 0.0 {
+                (*value / max).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let bar_w = (frac * 200.0) as f32;
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .py(px(2.0))
+                    .child(
+                        div()
+                            .w(px(120.0))
+                            .text_color(rgb(theme::TX_2))
+                            .child(name.clone()),
+                    )
+                    .child(
+                        div()
+                            .h(px(6.0))
+                            .w(px(bar_w))
+                            .bg(rgb(theme::ACCENT_SOFT))
+                            .border_1()
+                            .border_color(rgb(theme::ACCENT_LINE))
+                            .rounded(px(2.0)),
+                    )
+                    .child(
+                        div()
+                            .ml_2()
+                            .text_color(rgb(theme::TX_4))
+                            .child(format!("{value:.2}")),
+                    ),
+            );
+        }
+
+        div().flex().flex_col().child(header).child(list)
+    }
+
     /// Components pane body: indented DFS render of the component tree
     /// + props/state strip for the selected node.
     fn render_components_body(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -2603,6 +2703,7 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_clear_network))
             .on_action(cx.listener(Self::on_components_load_demo))
             .on_action(cx.listener(Self::on_components_clear))
+            .on_action(cx.listener(Self::on_profiler_refresh))
             .on_key_down(cx.listener(Self::on_key_down))
             .flex()
             .flex_col()
@@ -2917,6 +3018,7 @@ fn main() {
                         selected_request: None,
                         components: ComponentTree::new(),
                         selected_node: None,
+                        metrics: Vec::new(),
                         dock: DockPane::Console,
                         current_url: None,
                     })
