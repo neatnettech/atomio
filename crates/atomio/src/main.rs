@@ -28,6 +28,7 @@ use gpui::{
 };
 use inspector::{CallStack, Property, WatchList};
 use language::{highlight, HighlightKind, Language, Span};
+use network::{NetworkRegistry, RequestState, ResourceKind, WsDirection};
 use tracing::debug;
 
 actions!(
@@ -76,6 +77,8 @@ actions!(
         ShowComponents,
         ShowProfiler,
         ShowConsole,
+        ShowNetwork,
+        ClearNetwork,
     ]
 );
 
@@ -98,6 +101,7 @@ enum DockPane {
     Components,
     Profiler,
     Console,
+    Network,
 }
 
 impl DockPane {
@@ -109,6 +113,7 @@ impl DockPane {
             DockPane::Components => "Components",
             DockPane::Profiler => "Profiler",
             DockPane::Console => "Console",
+            DockPane::Network => "Network",
         }
     }
 
@@ -122,6 +127,7 @@ impl DockPane {
             DockPane::Components => "C",
             DockPane::Profiler => "P",
             DockPane::Console => "L",
+            DockPane::Network => "N",
         }
     }
 }
@@ -292,6 +298,42 @@ fn value_color_for(type_str: &str) -> u32 {
     }
 }
 
+fn method_color_for(m: network::Method) -> u32 {
+    use network::Method::*;
+    match m {
+        Get => theme::INFO,
+        Post => theme::ACCENT,
+        Put | Patch => theme::WARN,
+        Delete => theme::ERROR,
+        _ => theme::TX_3,
+    }
+}
+
+fn status_color(status: u16) -> u32 {
+    match status {
+        100..=199 => theme::TX_4,
+        200..=299 => theme::ACCENT,
+        300..=399 => theme::INFO,
+        400..=499 => theme::WARN,
+        500..=599 => theme::ERROR,
+        _ => theme::TX_4,
+    }
+}
+
+fn url_basename(url: &str) -> String {
+    let trimmed = url.split('?').next().unwrap_or(url);
+    if let Some(idx) = trimmed.rfind('/') {
+        let after = &trimmed[idx + 1..];
+        if after.is_empty() {
+            url.to_string()
+        } else {
+            after.to_string()
+        }
+    } else {
+        url.to_string()
+    }
+}
+
 /// Map a [`console::LogLevel`] to a rendering colour.
 fn log_level_color(level: console::LogLevel) -> u32 {
     use console::LogLevel::*;
@@ -403,6 +445,10 @@ struct AtomioWindow {
     /// Inline values for identifiers on the paused line. Keyed by ident
     /// name; cleared on resume.
     inline_values: HashMap<String, Result<inspector::RemoteValue, String>>,
+    /// Captured network requests + WS frames.
+    network: NetworkRegistry,
+    /// Selected request id in the network pane.
+    selected_request: Option<String>,
     /// Currently active right-dock pane.
     dock: DockPane,
     /// CDP source URL of the currently displayed buffer (when fetched from
@@ -439,6 +485,8 @@ fn build_command_registry() -> CommandRegistry {
     reg.register("View: Components Pane", "show_components");
     reg.register("View: Profiler Pane", "show_profiler");
     reg.register("View: Console Pane", "show_console");
+    reg.register("View: Network Pane", "show_network");
+    reg.register("Network: Clear", "clear_network");
     reg
 }
 
@@ -893,6 +941,8 @@ impl AtomioWindow {
             "show_components" => self.on_show_components(&ShowComponents, window, cx),
             "show_profiler" => self.on_show_profiler(&ShowProfiler, window, cx),
             "show_console" => self.on_show_console(&ShowConsole, window, cx),
+            "show_network" => self.on_show_network(&ShowNetwork, window, cx),
+            "clear_network" => self.on_clear_network(&ClearNetwork, window, cx),
             _ => {}
         }
     }
@@ -955,6 +1005,8 @@ impl AtomioWindow {
         self.properties.clear();
         self.expanded.clear();
         self.pending_props_tags.clear();
+        self.network.clear();
+        self.selected_request = None;
         cx.notify();
     }
 
@@ -1016,6 +1068,14 @@ impl AtomioWindow {
     }
     fn on_show_console(&mut self, _: &ShowConsole, _: &mut Window, cx: &mut Context<Self>) {
         self.show_dock(DockPane::Console, cx);
+    }
+    fn on_show_network(&mut self, _: &ShowNetwork, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_dock(DockPane::Network, cx);
+    }
+    fn on_clear_network(&mut self, _: &ClearNetwork, _: &mut Window, cx: &mut Context<Self>) {
+        self.network.clear();
+        self.selected_request = None;
+        cx.notify();
     }
 
     /// Toggle breakpoint at zero-based `line` for the currently displayed
@@ -1331,6 +1391,30 @@ impl AtomioWindow {
                     self.inline_values.insert(ident, result);
                     changed = true;
                 }
+                DebuggerEvent::NetworkEvent { method, params } => {
+                    match method.as_str() {
+                        "Network.requestWillBeSent" => {
+                            self.network.on_request_will_be_sent(&params);
+                        }
+                        "Network.responseReceived" => {
+                            self.network.on_response_received(&params);
+                        }
+                        "Network.loadingFinished" => {
+                            self.network.on_loading_finished(&params);
+                        }
+                        "Network.loadingFailed" => {
+                            self.network.on_loading_failed(&params);
+                        }
+                        "Network.webSocketFrameSent" => {
+                            self.network.on_ws_frame(WsDirection::Sent, &params);
+                        }
+                        "Network.webSocketFrameReceived" => {
+                            self.network.on_ws_frame(WsDirection::Received, &params);
+                        }
+                        _ => {}
+                    }
+                    changed = true;
+                }
             }
         }
         if changed {
@@ -1386,6 +1470,7 @@ impl AtomioWindow {
         let items = [
             DockPane::Files,
             DockPane::Debugger,
+            DockPane::Network,
             DockPane::Simulator,
             DockPane::Components,
             DockPane::Profiler,
@@ -1573,6 +1658,7 @@ impl AtomioWindow {
             DockPane::Simulator => placeholder("Simulator pane ships in v0.5"),
             DockPane::Components => placeholder("React component tree ships in v0.4"),
             DockPane::Profiler => placeholder("Profiler ships in v0.5"),
+            DockPane::Network => self.render_network_body(cx),
         };
 
         div()
@@ -1957,6 +2043,181 @@ impl AtomioWindow {
         div().child(inner)
     }
 
+    /// Network pane body. Header + scrolling row list of requests; each
+    /// row clickable to select. Selected request shows a small detail
+    /// strip (status / mime / duration / encoded bytes).
+    fn render_network_body(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let total = self.network.len();
+        let header = div()
+            .px_3()
+            .py_1()
+            .text_xs()
+            .text_color(rgb(theme::TX_3))
+            .child(format!("{total} requests · cmd+shift+p Network: Clear"));
+
+        let mut list = div().flex().flex_col();
+        let all: Vec<_> = self.network.iter().cloned().collect();
+        let last: Vec<_> = all
+            .into_iter()
+            .rev()
+            .take(200)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if last.is_empty() {
+            list = list.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(rgb(theme::TX_4))
+                    .child("(no traffic — fetch / xhr from the running app shows here)"),
+            );
+        } else {
+            for req in last {
+                let id = req.id.clone();
+                let id_for_click = id.clone();
+                let selected = self.selected_request.as_deref() == Some(&id);
+                let bg = if selected { theme::BG_3 } else { theme::BG_2 };
+                let method_color = method_color_for(req.method);
+                let (status_str, status_col) = match &req.state {
+                    RequestState::Pending => ("…".to_string(), theme::TX_4),
+                    RequestState::Headers { status, .. } => {
+                        (status.to_string(), status_color(*status))
+                    }
+                    RequestState::Done { status, .. } => {
+                        (status.to_string(), status_color(*status))
+                    }
+                    RequestState::Failed { .. } => ("ERR".to_string(), theme::ERROR),
+                };
+                let timing = match &req.state {
+                    RequestState::Done { duration_ms, .. } => format!("{:.0} ms", duration_ms),
+                    _ => "—".into(),
+                };
+                let kind_tag = match req.kind {
+                    ResourceKind::Xhr => "XHR",
+                    ResourceKind::Fetch => "FETCH",
+                    ResourceKind::WebSocket => "WS",
+                    ResourceKind::Document => "DOC",
+                    ResourceKind::Stylesheet => "CSS",
+                    ResourceKind::Script => "JS",
+                    ResourceKind::Image => "IMG",
+                    ResourceKind::Font => "FONT",
+                    ResourceKind::EventSource => "SSE",
+                    ResourceKind::Other => "—",
+                };
+                let url_short = url_basename(&req.url);
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("net-{id}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py(px(2.0))
+                        .text_xs()
+                        .bg(rgb(bg))
+                        .child(
+                            div()
+                                .w(px(40.0))
+                                .text_color(rgb(method_color))
+                                .child(req.method.label()),
+                        )
+                        .child(
+                            div()
+                                .w(px(34.0))
+                                .text_color(rgb(theme::TX_4))
+                                .child(kind_tag),
+                        )
+                        .child(div().flex_1().text_color(rgb(theme::TX_2)).child(url_short))
+                        .child(
+                            div()
+                                .w(px(36.0))
+                                .text_color(rgb(status_col))
+                                .child(status_str),
+                        )
+                        .child(div().w(px(48.0)).text_color(rgb(theme::TX_4)).child(timing))
+                        .on_click(cx.listener(move |this, _ev, _win, cx| {
+                            this.selected_request = Some(id_for_click.clone());
+                            cx.notify();
+                        })),
+                );
+            }
+        }
+
+        let detail = if let Some(id) = self.selected_request.as_deref() {
+            self.network
+                .get(id)
+                .map(|req| self.render_network_detail(req))
+        } else {
+            None
+        };
+
+        let mut wrap = div().flex().flex_col().child(header).child(list);
+        if let Some(d) = detail {
+            wrap = wrap.child(d);
+        }
+        wrap
+    }
+
+    /// Detail strip for the selected request -- full URL, headers,
+    /// timing, WS frames if any.
+    fn render_network_detail(&self, req: &network::NetworkRequest) -> gpui::Div {
+        let mut detail = div()
+            .flex()
+            .flex_col()
+            .px_3()
+            .py_2()
+            .border_t_1()
+            .border_color(rgb(theme::LINE_1))
+            .text_xs()
+            .text_color(rgb(theme::TX_2))
+            .child(div().text_color(rgb(theme::TX_3)).pb_1().child("Request"))
+            .child(div().text_color(rgb(theme::TX_2)).child(req.url.clone()));
+        if !req.req_headers.is_empty() {
+            for (k, v) in req.req_headers.iter().take(8) {
+                detail = detail.child(
+                    div()
+                        .text_color(rgb(theme::TX_4))
+                        .child(format!("{k}: {v}")),
+                );
+            }
+        }
+        if !req.resp_headers.is_empty() {
+            detail = detail.child(div().text_color(rgb(theme::TX_3)).pt_1().child("Response"));
+            for (k, v) in req.resp_headers.iter().take(8) {
+                detail = detail.child(
+                    div()
+                        .text_color(rgb(theme::TX_4))
+                        .child(format!("{k}: {v}")),
+                );
+            }
+        }
+        if !req.ws_frames.is_empty() {
+            detail = detail.child(
+                div()
+                    .text_color(rgb(theme::TX_3))
+                    .pt_1()
+                    .child(format!("WebSocket frames ({})", req.ws_frames.len())),
+            );
+            for frame in req.ws_frames.iter().rev().take(20) {
+                let arrow = match frame.direction {
+                    WsDirection::Sent => "→",
+                    WsDirection::Received => "←",
+                };
+                let preview: String = frame.payload.chars().take(120).collect();
+                detail = detail.child(
+                    div()
+                        .text_color(rgb(theme::TX_4))
+                        .child(format!("{arrow} {preview}")),
+                );
+            }
+        }
+        detail
+    }
+
     /// Console body (entries list). Used by [`render_dock`] when console
     /// pane is active.
     fn render_console_body(&self) -> gpui::Div {
@@ -2168,6 +2429,8 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_show_components))
             .on_action(cx.listener(Self::on_show_profiler))
             .on_action(cx.listener(Self::on_show_console))
+            .on_action(cx.listener(Self::on_show_network))
+            .on_action(cx.listener(Self::on_clear_network))
             .on_key_down(cx.listener(Self::on_key_down))
             .flex()
             .flex_col()
@@ -2434,6 +2697,7 @@ fn main() {
             KeyBinding::new("cmd-4", ShowComponents, Some("atomio")),
             KeyBinding::new("cmd-5", ShowProfiler, Some("atomio")),
             KeyBinding::new("cmd-6", ShowConsole, Some("atomio")),
+            KeyBinding::new("cmd-7", ShowNetwork, Some("atomio")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
@@ -2477,6 +2741,8 @@ fn main() {
                         pending_watch_tags: HashMap::new(),
                         next_watch_tag: 0,
                         inline_values: HashMap::new(),
+                        network: NetworkRegistry::new(),
+                        selected_request: None,
                         dock: DockPane::Console,
                         current_url: None,
                     })

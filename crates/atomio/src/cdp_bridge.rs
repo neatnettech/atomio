@@ -18,8 +18,8 @@ use console::{entry_from_console_api_called, LogLevel, SourceLocation};
 use debugger::breakpoints::BreakpointId;
 use debugger::cdp::{
     debugger_enable, debugger_pause, debugger_resume, debugger_step_into, debugger_step_out,
-    debugger_step_over, evaluate_on_call_frame, get_properties, remove_breakpoint, runtime_enable,
-    set_breakpoint_by_url, CdpMessage,
+    debugger_step_over, evaluate_on_call_frame, get_properties, network_enable, remove_breakpoint,
+    runtime_enable, set_breakpoint_by_url, CdpMessage,
 };
 use debugger::metro::{fetch_source, scan_localhost};
 use debugger::scripts::Script;
@@ -138,6 +138,14 @@ pub enum DebuggerEvent {
     InlineEvaluated {
         ident: String,
         result: Result<RemoteValue, String>,
+    },
+    /// Raw `Network.*` event passed through to the UI for the
+    /// [`network::NetworkRegistry`] to apply. Method is the CDP method
+    /// name (e.g. "Network.requestWillBeSent"); params is the unparsed
+    /// payload.
+    NetworkEvent {
+        method: String,
+        params: serde_json::Value,
     },
 }
 
@@ -430,6 +438,7 @@ async fn connect(
 
     let _ = transport.send(&runtime_enable()).await;
     let _ = transport.send(&debugger_enable()).await;
+    let _ = transport.send(&network_enable()).await;
 
     let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Connected {
         ws_url: ws_url.clone(),
@@ -482,6 +491,12 @@ async fn connect(
                     }
                     "Debugger.resumed" => {
                         let _ = evt_tx.send(DebuggerEvent::Resumed);
+                    }
+                    other if other.starts_with("Network.") => {
+                        let _ = evt_tx.send(DebuggerEvent::NetworkEvent {
+                            method: other.to_string(),
+                            params: params.clone(),
+                        });
                     }
                     _ => {}
                 },
