@@ -18,8 +18,8 @@ use console::{entry_from_console_api_called, LogLevel, SourceLocation};
 use debugger::breakpoints::BreakpointId;
 use debugger::cdp::{
     debugger_enable, debugger_pause, debugger_resume, debugger_step_into, debugger_step_out,
-    debugger_step_over, evaluate_on_call_frame, get_properties, network_enable, remove_breakpoint,
-    runtime_enable, set_breakpoint_by_url, CdpMessage,
+    debugger_step_over, evaluate_on_call_frame, get_properties, network_enable, performance_enable,
+    performance_get_metrics, remove_breakpoint, runtime_enable, set_breakpoint_by_url, CdpMessage,
 };
 use debugger::metro::{fetch_source, scan_localhost};
 use debugger::scripts::Script;
@@ -83,6 +83,9 @@ pub enum DebuggerCommand {
         ident: String,
         call_frame_id: String,
     },
+    /// Fetch one snapshot of `Performance.getMetrics`. Result emitted as
+    /// [`DebuggerEvent::PerformanceMetrics`].
+    GetPerformanceMetrics,
     /// Step controls -- map directly to CDP `Debugger.*` methods.
     Resume,
     StepOver,
@@ -147,6 +150,8 @@ pub enum DebuggerEvent {
         method: String,
         params: serde_json::Value,
     },
+    /// Snapshot from `Performance.getMetrics`. Each entry is `(name, value)`.
+    PerformanceMetrics(Vec<(String, f64)>),
 }
 
 /// Coarse connection state. Detailed CDP state lives in the worker.
@@ -206,6 +211,9 @@ type PendingProperties = Arc<Mutex<HashMap<u64, u64>>>;
 type PendingWatches = Arc<Mutex<HashMap<u64, u64>>>;
 /// CDP request id → identifier being evaluated for inline display.
 type PendingInline = Arc<Mutex<HashMap<u64, String>>>;
+/// Pending Performance.getMetrics request ids (just IDs; result is
+/// always emitted as `PerformanceMetrics`).
+type PendingMetrics = Arc<Mutex<std::collections::HashSet<u64>>>;
 
 /// The worker's async main loop. One outstanding CDP connection at a time.
 async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerEvent>) {
@@ -216,6 +224,7 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
     let pending_props: PendingProperties = Arc::new(Mutex::new(HashMap::new()));
     let pending_watches: PendingWatches = Arc::new(Mutex::new(HashMap::new()));
     let pending_inline: PendingInline = Arc::new(Mutex::new(HashMap::new()));
+    let pending_metrics: PendingMetrics = Arc::new(Mutex::new(Default::default()));
 
     loop {
         // Block on a command from the UI. Channel close = shutdown.
@@ -246,9 +255,21 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                     &pending_props,
                     &pending_watches,
                     &pending_inline,
+                    &pending_metrics,
                     &evt_tx,
                 )
                 .await;
+            }
+            DebuggerCommand::GetPerformanceMetrics => {
+                let Some(t) = transport.lock().await.clone() else {
+                    continue;
+                };
+                let req = performance_get_metrics();
+                pending_metrics.lock().await.insert(req.id);
+                if let Err(e) = t.send(&req).await {
+                    warn!(target: "atomio::bridge", error = %e, "send getMetrics failed");
+                    pending_metrics.lock().await.remove(&req.id);
+                }
             }
             DebuggerCommand::SetBreakpoint {
                 local,
@@ -381,6 +402,7 @@ async fn connect(
     pending_props: &PendingProperties,
     pending_watches: &PendingWatches,
     pending_inline: &PendingInline,
+    pending_metrics: &PendingMetrics,
     evt_tx: &Sender<DebuggerEvent>,
 ) {
     info!(target: "atomio::bridge", "connect requested");
@@ -439,6 +461,7 @@ async fn connect(
     let _ = transport.send(&runtime_enable()).await;
     let _ = transport.send(&debugger_enable()).await;
     let _ = transport.send(&network_enable()).await;
+    let _ = transport.send(&performance_enable()).await;
 
     let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Connected {
         ws_url: ws_url.clone(),
@@ -450,6 +473,7 @@ async fn connect(
     let pending_props = pending_props.clone();
     let pending_watches = pending_watches.clone();
     let pending_inline = pending_inline.clone();
+    let pending_metrics = pending_metrics.clone();
     tokio::spawn(async move {
         while let Ok(msg) = events.recv().await {
             match msg {
@@ -558,6 +582,15 @@ async fn connect(
                     if let Some(ident) = inline_ident {
                         let result = decode_evaluate(result);
                         let _ = evt_tx.send(DebuggerEvent::InlineEvaluated { ident, result });
+                        continue;
+                    }
+                    // Match against pending metrics requests.
+                    let was_metrics = pending_metrics.lock().await.remove(&id);
+                    if was_metrics {
+                        if let Ok(value) = result {
+                            let metrics = parse_metrics(&value);
+                            let _ = evt_tx.send(DebuggerEvent::PerformanceMetrics(metrics));
+                        }
                     }
                 }
             }
@@ -569,6 +602,21 @@ async fn connect(
 
 /// Pull `breakpointId` and the first resolved line out of a
 /// `Debugger.setBreakpointByUrl` success response.
+/// Decode a `Performance.getMetrics` response shape:
+/// `{ metrics: [{ name, value }, ...] }`.
+fn parse_metrics(value: &Value) -> Vec<(String, f64)> {
+    let Some(arr) = value.get("metrics").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|m| {
+            let name = m.get("name")?.as_str()?.to_string();
+            let val = m.get("value")?.as_f64()?;
+            Some((name, val))
+        })
+        .collect()
+}
+
 /// Decode a `Debugger.evaluateOnCallFrame` response into a Result. Both
 /// watch and inline-value paths share this shape.
 fn decode_evaluate(result: Result<Value, debugger::cdp::CdpError>) -> Result<RemoteValue, String> {
@@ -651,5 +699,24 @@ mod tests {
     fn parse_breakpoint_resolved_missing_line() {
         let p = serde_json::json!({"breakpointId": "x"});
         assert!(parse_breakpoint_resolved(&p).is_none());
+    }
+
+    #[test]
+    fn parse_metrics_basic() {
+        let v = serde_json::json!({
+            "metrics": [
+                {"name": "Frames", "value": 60.0},
+                {"name": "Heap", "value": 1234.5}
+            ]
+        });
+        let m = parse_metrics(&v);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0].0, "Frames");
+        assert!((m[1].1 - 1234.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_metrics_missing_returns_empty() {
+        assert!(parse_metrics(&serde_json::json!({})).is_empty());
     }
 }

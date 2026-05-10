@@ -212,6 +212,16 @@ pub fn network_enable() -> CdpRequest {
     CdpRequest::new("Network.enable")
 }
 
+/// `Performance.enable` -- start collecting runtime metrics.
+pub fn performance_enable() -> CdpRequest {
+    CdpRequest::new("Performance.enable")
+}
+
+/// `Performance.getMetrics` -- one-shot snapshot of current metrics.
+pub fn performance_get_metrics() -> CdpRequest {
+    CdpRequest::new("Performance.getMetrics")
+}
+
 /// `Debugger.evaluateOnCallFrame` -- evaluate an expression in the
 /// scope of a paused call frame (so locals/closure refs resolve).
 pub fn evaluate_on_call_frame(call_frame_id: &str, expression: &str) -> CdpRequest {
