@@ -34,6 +34,11 @@
       "package-name": "inspector",
       "skip-github-release": true,
       "changelog-path": "../../CHANGELOG.md"
+    },
+    "crates/network": {
+      "package-name": "network",
+      "skip-github-release": true,
+      "changelog-path": "../../CHANGELOG.md"
     }
   }
 }
