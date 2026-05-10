@@ -39,6 +39,11 @@
       "package-name": "network",
       "skip-github-release": true,
       "changelog-path": "../../CHANGELOG.md"
+    },
+    "crates/react_tree": {
+      "package-name": "react_tree",
+      "skip-github-release": true,
+      "changelog-path": "../../CHANGELOG.md"
     }
   }
 }
