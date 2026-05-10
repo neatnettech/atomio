@@ -432,6 +432,7 @@ dependencies = [
  "gpui",
  "inspector",
  "language",
+ "network",
  "rfd",
  "serde_json",
  "tokio",

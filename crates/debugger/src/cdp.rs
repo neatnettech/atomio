@@ -207,6 +207,11 @@ pub fn evaluate(expression: &str) -> CdpRequest {
     )
 }
 
+/// `Network.enable` -- start receiving network domain events.
+pub fn network_enable() -> CdpRequest {
+    CdpRequest::new("Network.enable")
+}
+
 /// `Debugger.evaluateOnCallFrame` -- evaluate an expression in the
 /// scope of a paused call frame (so locals/closure refs resolve).
 pub fn evaluate_on_call_frame(call_frame_id: &str, expression: &str) -> CdpRequest {
