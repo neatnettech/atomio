@@ -217,6 +217,20 @@ pub fn performance_enable() -> CdpRequest {
     CdpRequest::new("Performance.enable")
 }
 
+/// `Page.enable` -- enable Page domain (needed for screenshots).
+pub fn page_enable() -> CdpRequest {
+    CdpRequest::new("Page.enable")
+}
+
+/// `Page.captureScreenshot` -- one-shot PNG screenshot. Returns base64
+/// PNG in the response under `data`.
+pub fn page_capture_screenshot() -> CdpRequest {
+    CdpRequest::with_params(
+        "Page.captureScreenshot",
+        serde_json::json!({"format": "png"}),
+    )
+}
+
 /// `Performance.getMetrics` -- one-shot snapshot of current metrics.
 pub fn performance_get_metrics() -> CdpRequest {
     CdpRequest::new("Performance.getMetrics")

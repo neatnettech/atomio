@@ -18,8 +18,9 @@ use console::{entry_from_console_api_called, LogLevel, SourceLocation};
 use debugger::breakpoints::BreakpointId;
 use debugger::cdp::{
     debugger_enable, debugger_pause, debugger_resume, debugger_step_into, debugger_step_out,
-    debugger_step_over, evaluate_on_call_frame, get_properties, network_enable, performance_enable,
-    performance_get_metrics, remove_breakpoint, runtime_enable, set_breakpoint_by_url, CdpMessage,
+    debugger_step_over, evaluate_on_call_frame, get_properties, network_enable,
+    page_capture_screenshot, page_enable, performance_enable, performance_get_metrics,
+    remove_breakpoint, runtime_enable, set_breakpoint_by_url, CdpMessage,
 };
 use debugger::metro::{fetch_source, scan_localhost};
 use debugger::scripts::Script;
@@ -86,6 +87,10 @@ pub enum DebuggerCommand {
     /// Fetch one snapshot of `Performance.getMetrics`. Result emitted as
     /// [`DebuggerEvent::PerformanceMetrics`].
     GetPerformanceMetrics,
+    /// Capture one PNG screenshot via `Page.captureScreenshot`. Result
+    /// emitted as [`DebuggerEvent::ScreenshotCaptured`] with the
+    /// base64-encoded payload.
+    CaptureScreenshot,
     /// Step controls -- map directly to CDP `Debugger.*` methods.
     Resume,
     StepOver,
@@ -152,6 +157,9 @@ pub enum DebuggerEvent {
     },
     /// Snapshot from `Performance.getMetrics`. Each entry is `(name, value)`.
     PerformanceMetrics(Vec<(String, f64)>),
+    /// Result of [`DebuggerCommand::CaptureScreenshot`]. Carries the raw
+    /// base64-encoded PNG payload as it arrived from CDP; UI decodes.
+    ScreenshotCaptured { data_base64: String },
 }
 
 /// Coarse connection state. Detailed CDP state lives in the worker.
@@ -214,6 +222,8 @@ type PendingInline = Arc<Mutex<HashMap<u64, String>>>;
 /// Pending Performance.getMetrics request ids (just IDs; result is
 /// always emitted as `PerformanceMetrics`).
 type PendingMetrics = Arc<Mutex<std::collections::HashSet<u64>>>;
+/// Pending Page.captureScreenshot request ids.
+type PendingScreenshots = Arc<Mutex<std::collections::HashSet<u64>>>;
 
 /// The worker's async main loop. One outstanding CDP connection at a time.
 async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerEvent>) {
@@ -225,6 +235,7 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
     let pending_watches: PendingWatches = Arc::new(Mutex::new(HashMap::new()));
     let pending_inline: PendingInline = Arc::new(Mutex::new(HashMap::new()));
     let pending_metrics: PendingMetrics = Arc::new(Mutex::new(Default::default()));
+    let pending_shots: PendingScreenshots = Arc::new(Mutex::new(Default::default()));
 
     loop {
         // Block on a command from the UI. Channel close = shutdown.
@@ -256,9 +267,21 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                     &pending_watches,
                     &pending_inline,
                     &pending_metrics,
+                    &pending_shots,
                     &evt_tx,
                 )
                 .await;
+            }
+            DebuggerCommand::CaptureScreenshot => {
+                let Some(t) = transport.lock().await.clone() else {
+                    continue;
+                };
+                let req = page_capture_screenshot();
+                pending_shots.lock().await.insert(req.id);
+                if let Err(e) = t.send(&req).await {
+                    warn!(target: "atomio::bridge", error = %e, "send captureScreenshot failed");
+                    pending_shots.lock().await.remove(&req.id);
+                }
             }
             DebuggerCommand::GetPerformanceMetrics => {
                 let Some(t) = transport.lock().await.clone() else {
@@ -396,6 +419,7 @@ async fn send_no_args(
 }
 
 /// Establish a CDP connection and spawn the event forwarder.
+#[allow(clippy::too_many_arguments)]
 async fn connect(
     transport_slot: &Arc<Mutex<Option<Arc<CdpTransport>>>>,
     pending: &PendingBreakpoints,
@@ -403,6 +427,7 @@ async fn connect(
     pending_watches: &PendingWatches,
     pending_inline: &PendingInline,
     pending_metrics: &PendingMetrics,
+    pending_shots: &PendingScreenshots,
     evt_tx: &Sender<DebuggerEvent>,
 ) {
     info!(target: "atomio::bridge", "connect requested");
@@ -462,6 +487,7 @@ async fn connect(
     let _ = transport.send(&debugger_enable()).await;
     let _ = transport.send(&network_enable()).await;
     let _ = transport.send(&performance_enable()).await;
+    let _ = transport.send(&page_enable()).await;
 
     let _ = evt_tx.send(DebuggerEvent::State(ConnectionState::Connected {
         ws_url: ws_url.clone(),
@@ -474,6 +500,7 @@ async fn connect(
     let pending_watches = pending_watches.clone();
     let pending_inline = pending_inline.clone();
     let pending_metrics = pending_metrics.clone();
+    let pending_shots = pending_shots.clone();
     tokio::spawn(async move {
         while let Ok(msg) = events.recv().await {
             match msg {
@@ -590,6 +617,18 @@ async fn connect(
                         if let Ok(value) = result {
                             let metrics = parse_metrics(&value);
                             let _ = evt_tx.send(DebuggerEvent::PerformanceMetrics(metrics));
+                        }
+                        continue;
+                    }
+                    // Match against pending screenshot requests.
+                    let was_shot = pending_shots.lock().await.remove(&id);
+                    if was_shot {
+                        if let Ok(value) = result {
+                            if let Some(data) = value.get("data").and_then(|v| v.as_str()) {
+                                let _ = evt_tx.send(DebuggerEvent::ScreenshotCaptured {
+                                    data_base64: data.to_string(),
+                                });
+                            }
                         }
                     }
                 }
