@@ -6,5 +6,6 @@
   "crates/console": "0.2.0",
   "crates/inspector": "0.2.0",
   "crates/network": "0.2.0",
-  "crates/react_tree": "0.2.0"
+  "crates/react_tree": "0.2.0",
+  "crates/workspace": "0.2.0"
 }

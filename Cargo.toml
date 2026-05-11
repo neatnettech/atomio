@@ -9,6 +9,7 @@ members = [
     "crates/inspector",
     "crates/network",
     "crates/react_tree",
+    "crates/workspace",
 ]
 
 [workspace.package]
@@ -26,4 +27,5 @@ console = { path = "crates/console" }
 inspector = { path = "crates/inspector" }
 network = { path = "crates/network" }
 react_tree = { path = "crates/react_tree" }
+workspace = { path = "crates/workspace" }
 ropey = "1.6"
