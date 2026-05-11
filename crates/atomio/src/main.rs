@@ -204,6 +204,11 @@ struct AtomioWindow {
     /// CDP source URL of the currently displayed buffer (when fetched from
     /// Metro). Required to scope breakpoints + match paused locations.
     current_url: Option<String>,
+    /// Reusable scratch buffer for `drain_bridge_events`. Carried across
+    /// renders to amortise allocation when the bridge produces a steady
+    /// stream of events (console logs / network ticks). Empty between
+    /// drains; capacity grows to the high-water mark for the session.
+    event_buf: Vec<DebuggerEvent>,
 }
 
 fn build_command_registry() -> CommandRegistry {
@@ -1087,15 +1092,25 @@ impl AtomioWindow {
 
     /// Drain pending events from the bridge and apply them to the window.
     fn drain_bridge_events(&mut self, cx: &mut Context<Self>) {
-        // Collect events first so the immutable borrow on `self.bridge` is
-        // dropped before we start mutating other fields (some handlers
-        // dispatch back into the bridge, which needs `&self`).
-        let events: Vec<DebuggerEvent> = match &self.bridge {
-            Some(b) => b.events.try_iter().collect(),
-            None => return,
-        };
+        // Reuse the per-window scratch buffer instead of allocating a new
+        // Vec per render. `mem::take` swaps in an empty Vec (no alloc)
+        // while we hold the borrow on `self.bridge`; we put the buffer
+        // back at the end with its capacity preserved.
+        let mut buf = std::mem::take(&mut self.event_buf);
+        buf.clear();
+        match &self.bridge {
+            Some(b) => buf.extend(b.events.try_iter()),
+            None => {
+                self.event_buf = buf;
+                return;
+            }
+        }
+        if buf.is_empty() {
+            self.event_buf = buf;
+            return;
+        }
         let mut changed = false;
-        for event in events {
+        for event in buf.drain(..) {
             match event {
                 DebuggerEvent::State(state) => {
                     self.status = match &state {
@@ -1276,6 +1291,8 @@ impl AtomioWindow {
                 }
             }
         }
+        // Restore the (now-empty, capacity-retained) buffer for next drain.
+        self.event_buf = buf;
         if changed {
             cx.notify();
         }
@@ -1541,6 +1558,7 @@ fn main() {
                         screenshot_count: 0,
                         dock: DockPane::Console,
                         current_url: None,
+                        event_buf: Vec::new(),
                     })
                 },
             )
