@@ -214,6 +214,10 @@ struct AtomioWindow {
     /// Recently opened projects. Persisted to disk in a follow-up PR;
     /// for now lives in memory for the duration of the session.
     recents: Recents,
+    /// Project-tree directory paths the user has expanded. Tree paths
+    /// are relative to `workspace.root()`. Empty on first open so the
+    /// tree shows only top-level entries until the user clicks.
+    expanded_dirs: HashSet<PathBuf>,
     /// `(url, line)` requested by a frame click while the buffer wasn't
     /// loaded yet. Applied once the matching [`DebuggerEvent::SourceFetched`]
     /// arrives, then cleared. Only the most recent click survives.
@@ -448,6 +452,47 @@ impl AtomioWindow {
             });
         })
         .detach();
+    }
+
+    /// Toggle expand/collapse state for a tree directory. Path is
+    /// workspace-relative so toggling survives a `refresh()` that
+    /// re-allocates entries.
+    pub(crate) fn toggle_dir(&mut self, rel: PathBuf, cx: &mut Context<Self>) {
+        if !self.expanded_dirs.remove(&rel) {
+            self.expanded_dirs.insert(rel);
+        }
+        cx.notify();
+    }
+
+    /// Open a file from the tree pane. Resolves `rel` against the
+    /// workspace root (rejecting `..` traversal), reads it via
+    /// `Buffer::open`, and replaces the editor buffer. Clears
+    /// `current_url` so paused-line / breakpoint matching doesn't
+    /// fire against a CDP URL that no longer corresponds to what's
+    /// on screen. The buffer opens writable.
+    pub(crate) fn open_workspace_file(&mut self, rel: PathBuf, cx: &mut Context<Self>) {
+        let Some(ws) = self.workspace.as_ref() else {
+            self.status = "no project open".into();
+            cx.notify();
+            return;
+        };
+        let Some(abs) = ws.absolute(&rel) else {
+            self.status = format!("rejecting path traversal: {}", rel.display()).into();
+            cx.notify();
+            return;
+        };
+        match Buffer::open(&abs) {
+            Ok(buf) => {
+                self.state.replace_buffer(buf);
+                self.state.set_read_only(false);
+                self.current_url = None;
+                self.status = format!("opened {}", rel.display()).into();
+            }
+            Err(e) => {
+                self.status = format!("open failed: {e}").into();
+            }
+        }
+        cx.notify();
     }
 
     fn on_save(&mut self, _: &SaveFile, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1676,6 +1721,7 @@ fn main() {
                             current_url: None,
                             workspace: None,
                             recents: Recents::new(),
+                            expanded_dirs: HashSet::new(),
                             pending_jump: None,
                             event_buf: Vec::new(),
                         })

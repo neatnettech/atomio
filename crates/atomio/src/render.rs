@@ -402,17 +402,6 @@ pub(crate) fn short_ws_url(ws_url: &str) -> String {
     format!("{host}{prefix}{path_tail}")
 }
 
-pub(crate) fn placeholder(label: impl Into<SharedString>) -> gpui::Div {
-    div()
-        .flex_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_xs()
-        .text_color(rgb(theme::TX_4))
-        .child(label.into())
-}
-
 impl AtomioWindow {
     /// Activity bar (left rail). Per `docs/design.md`: 48px wide, 36x36
     /// items, 2px accent indicator on the left edge of the active row,
@@ -709,7 +698,7 @@ impl AtomioWindow {
 
         let body = match pane {
             DockPane::Console => self.render_console_body(),
-            DockPane::Files => placeholder("File tree ships in v0.6"),
+            DockPane::Files => self.render_files_body(cx),
             DockPane::Debugger => self.render_debugger_body(cx),
             DockPane::Simulator => self.render_simulator_body(cx),
             DockPane::Components => self.render_components_body(cx),
@@ -1616,6 +1605,102 @@ impl AtomioWindow {
             wrap = wrap.child(d);
         }
         wrap
+    }
+
+    /// Files pane body: header + collapsible tree rendered from the
+    /// current workspace's `files()` snapshot.
+    ///
+    /// Traversal: the snapshot is pre-order DFS, so parents land
+    /// before children. We carry a `collapsed_until_depth` cursor —
+    /// once we hit an unexpanded directory we skip every subsequent
+    /// row at strictly greater depth until the depth drops back. That
+    /// keeps the render O(visible rows) instead of O(all entries).
+    fn render_files_body(&self, cx: &mut Context<Self>) -> gpui::Div {
+        use workspace::FileKind;
+
+        let Some(ws) = self.workspace.as_ref() else {
+            return div()
+                .flex_1()
+                .px_3()
+                .py_4()
+                .text_xs()
+                .text_color(rgb(theme::TX_4))
+                .child("(no project — cmd+shift+o or palette: File: Open Project)");
+        };
+
+        let header = div()
+            .px_3()
+            .py_1()
+            .text_xs()
+            .text_color(rgb(theme::TX_3))
+            .child(format!(
+                "{} · {} files",
+                ws.display_name(),
+                ws.files().len()
+            ));
+
+        let mut list = div().flex().flex_col().pb_2();
+        let mut collapsed_until_depth: Option<usize> = None;
+        for entry in ws.files() {
+            if let Some(d) = collapsed_until_depth {
+                if entry.depth > d {
+                    continue;
+                }
+                collapsed_until_depth = None;
+            }
+            let rel = entry.path.clone();
+            let depth = entry.depth;
+            let is_dir = entry.kind == FileKind::Directory;
+            let is_open = is_dir && self.expanded_dirs.contains(&rel);
+            // After rendering, if this is an unexpanded dir we mute
+            // everything deeper than the current depth.
+            if is_dir && !is_open {
+                collapsed_until_depth = Some(depth);
+            }
+            let arrow = if !is_dir {
+                "  "
+            } else if is_open {
+                "▾ "
+            } else {
+                "▸ "
+            };
+            let name = rel
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| rel.to_string_lossy().into_owned());
+            let (fg, glyph) = match entry.kind {
+                FileKind::Directory => (theme::TX_2, "▢"),
+                FileKind::File => (theme::TX_2, "·"),
+                FileKind::Symlink => (theme::INFO, "↪"),
+            };
+            let row_id = SharedString::from(format!("tree-{}", rel.display()));
+            let rel_click = rel.clone();
+            let row = div()
+                .id(row_id)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_3()
+                .py(px(1.0))
+                .pl(px((12 + depth * 10) as f32))
+                .text_xs()
+                .rounded(px(3.0))
+                .hover(|s| s.bg(rgb(theme::BG_3)))
+                .child(div().w(px(10.0)).text_color(rgb(theme::TX_5)).child(arrow))
+                .child(div().w(px(10.0)).text_color(rgb(fg)).child(glyph))
+                .child(div().text_color(rgb(fg)).child(name))
+                .on_click(cx.listener(move |this, _ev, _win, cx| {
+                    if is_dir {
+                        this.toggle_dir(rel_click.clone(), cx);
+                    } else {
+                        this.open_workspace_file(rel_click.clone(), cx);
+                    }
+                }));
+            list = list.child(row);
+        }
+
+        div().flex().flex_col().child(header).child(list)
     }
 
     fn render_console_body(&self) -> gpui::Div {
