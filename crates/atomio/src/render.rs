@@ -10,8 +10,8 @@
 //! widen their visibility.
 
 use gpui::{
-    div, linear_color_stop, linear_gradient, prelude::*, px, rgb, Context, FocusHandle, Focusable,
-    Render, SharedString, Window,
+    div, linear_color_stop, linear_gradient, prelude::*, px, rgb, svg, Context, FocusHandle,
+    Focusable, Render, SharedString, Window,
 };
 use language::{HighlightKind, Span};
 
@@ -447,11 +447,15 @@ impl AtomioWindow {
                         .items_center()
                         .justify_center()
                         .rounded(px(6.0))
-                        .text_xs()
                         .text_color(rgb(fg))
                         .bg(rgb(bg))
                         .hover(|s| if is_active { s } else { s.bg(rgb(theme::BG_3)) })
-                        .child(pane.glyph()),
+                        .child(
+                            svg()
+                                .path(pane.icon_path())
+                                .size(px(18.0))
+                                .text_color(rgb(fg)),
+                        ),
                 )
                 .on_click(cx.listener(move |this, _ev, _win, cx| {
                     this.show_dock(pane_for_click, cx);
