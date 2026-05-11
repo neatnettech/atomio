@@ -64,3 +64,8 @@ pub const SX_BRK: u32 = 0x7a8290; // brackets
 pub const TRAFFIC_R: u32 = 0xff5f57;
 pub const TRAFFIC_Y: u32 = 0xfebc2e;
 pub const TRAFFIC_G: u32 = 0x28c941;
+
+// Titlebar vertical gradient stops. Spec:
+// `linear-gradient(180deg, #1a1f27 0%, #14181f 100%)`.
+pub const TITLEBAR_TOP: u32 = 0x1a1f27;
+pub const TITLEBAR_BOT: u32 = 0x14181f;
