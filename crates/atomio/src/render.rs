@@ -897,6 +897,7 @@ impl AtomioWindow {
         }
 
         let watch_section = self.render_watch_section();
+        let breakpoints_section = self.render_breakpoints_section(cx);
 
         div()
             .flex_1()
@@ -905,6 +906,85 @@ impl AtomioWindow {
             .child(frames_section)
             .child(scopes_section)
             .child(watch_section)
+            .child(breakpoints_section)
+    }
+
+    /// Breakpoints sidebar: header + one row per registered breakpoint.
+    /// Each row shows accent dot + url-basename:line and is clickable
+    /// to open that file in the editor on that line. Hit counts will
+    /// land once `BreakpointRegistry` tracks them — for now the row
+    /// just shows the location and an enabled/disabled tint.
+    fn render_breakpoints_section(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let mut wrap = div()
+            .flex()
+            .flex_col()
+            .px_3()
+            .py_2()
+            .border_t_1()
+            .border_color(rgb(theme::LINE_1))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::TX_3))
+                    .pb_1()
+                    .child(format!("Breakpoints ({})", self.breakpoints.len())),
+            );
+        if self.breakpoints.is_empty() {
+            wrap = wrap.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::TX_4))
+                    .child("(click a line number in the gutter)"),
+            );
+            return wrap;
+        }
+        // Sort by (url, line) for stable display order; the registry
+        // hashmap iteration is otherwise insertion-undefined.
+        let mut entries: Vec<_> = self.breakpoints.iter().collect();
+        entries.sort_by(|a, b| {
+            a.url
+                .cmp(&b.url)
+                .then(a.resolved_line.cmp(&b.resolved_line))
+        });
+        for bp in entries {
+            let url = bp.url.clone();
+            let line = bp.resolved_line;
+            let basename = url_basename(&url);
+            let (dot_color, text_color) = if bp.enabled {
+                (theme::ACCENT, theme::TX_2)
+            } else {
+                (theme::TX_5, theme::TX_4)
+            };
+            let key = format!("bp-{}-{}", bp.id.0, line);
+            wrap = wrap.child(
+                div()
+                    .id(SharedString::from(key))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .py(px(2.0))
+                    .rounded(px(3.0))
+                    .hover(|s| s.bg(rgb(theme::BG_3)))
+                    .child(
+                        div()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(dot_color)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(text_color))
+                            .child(format!("{basename}:{}", line + 1)),
+                    )
+                    .on_click(cx.listener(move |this, _ev, _win, cx| {
+                        this.open_source_at(url.clone(), line, cx);
+                    })),
+            );
+        }
+        wrap
     }
 
     /// Watch expressions section.
