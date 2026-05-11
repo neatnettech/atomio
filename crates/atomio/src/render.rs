@@ -544,6 +544,11 @@ impl AtomioWindow {
                 row = row.child(div().child(" "));
             }
 
+            // Inline value pills: shown after expressions on the paused
+            // line. Per docs/design.md the pill background is BG_4; we
+            // additionally tint the value text by its CDP `type` so the
+            // user can tell number/string/object apart at a glance. The
+            // ident label sits in TX_3 for contrast against the value.
             if is_paused_here && !self.inline_values.is_empty() {
                 for ident in extract_idents(&text) {
                     if let Some(result) = self.inline_values.get(&ident) {
@@ -555,12 +560,18 @@ impl AtomioWindow {
                             div()
                                 .ml_2()
                                 .px_2()
-                                .py(px(0.0))
+                                .py(px(1.0))
                                 .rounded(px(4.0))
                                 .bg(rgb(theme::BG_4))
+                                .border_1()
+                                .border_color(rgb(theme::LINE_2))
                                 .text_xs()
-                                .text_color(rgb(color))
-                                .child(format!("{ident} = {display}")),
+                                .flex()
+                                .flex_row()
+                                .gap_1()
+                                .child(div().text_color(rgb(theme::TX_3)).child(ident.clone()))
+                                .child(div().text_color(rgb(theme::TX_4)).child("="))
+                                .child(div().text_color(rgb(color)).child(display)),
                         );
                     }
                 }
