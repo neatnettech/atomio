@@ -9,6 +9,7 @@
 //! rendering the buffer. That split keeps the interesting logic
 //! unit-testable and the UI layer trivially replaceable.
 
+mod assets;
 mod cdp_bridge;
 mod render;
 mod theme;
@@ -125,17 +126,17 @@ impl DockPane {
         }
     }
 
-    /// Single-character glyph for the activity bar. Real lucide-style icons
-    /// land in a follow-up PR; for now a calm monospace symbol.
-    fn glyph(self) -> &'static str {
+    /// Asset path to the lucide-style SVG icon for this pane. Resolved
+    /// by [`crate::assets::EmbeddedAssets`] at render time.
+    fn icon_path(self) -> &'static str {
         match self {
-            DockPane::Files => "F",
-            DockPane::Debugger => "D",
-            DockPane::Simulator => "S",
-            DockPane::Components => "C",
-            DockPane::Profiler => "P",
-            DockPane::Console => "L",
-            DockPane::Network => "N",
+            DockPane::Files => "icons/files.svg",
+            DockPane::Debugger => "icons/debugger.svg",
+            DockPane::Simulator => "icons/simulator.svg",
+            DockPane::Components => "icons/components.svg",
+            DockPane::Profiler => "icons/profiler.svg",
+            DockPane::Console => "icons/console.svg",
+            DockPane::Network => "icons/network.svg",
         }
     }
 }
@@ -1460,129 +1461,132 @@ fn main() {
 
     let buffer = load_initial_buffer();
 
-    Application::new().run(move |cx| {
-        cx.bind_keys([
-            KeyBinding::new("cmd-o", OpenFile, Some("atomio")),
-            KeyBinding::new("cmd-s", SaveFile, Some("atomio")),
-            KeyBinding::new("left", MoveLeft, Some("atomio")),
-            KeyBinding::new("right", MoveRight, Some("atomio")),
-            KeyBinding::new("up", MoveUp, Some("atomio")),
-            KeyBinding::new("down", MoveDown, Some("atomio")),
-            KeyBinding::new("home", MoveLineStart, Some("atomio")),
-            KeyBinding::new("end", MoveLineEnd, Some("atomio")),
-            KeyBinding::new("cmd-left", MoveLineStart, Some("atomio")),
-            KeyBinding::new("cmd-right", MoveLineEnd, Some("atomio")),
-            KeyBinding::new("shift-left", MoveLeftExtending, Some("atomio")),
-            KeyBinding::new("shift-right", MoveRightExtending, Some("atomio")),
-            KeyBinding::new("shift-up", MoveUpExtending, Some("atomio")),
-            KeyBinding::new("shift-down", MoveDownExtending, Some("atomio")),
-            KeyBinding::new("shift-home", MoveLineStartExtending, Some("atomio")),
-            KeyBinding::new("shift-end", MoveLineEndExtending, Some("atomio")),
-            KeyBinding::new("cmd-shift-left", MoveLineStartExtending, Some("atomio")),
-            KeyBinding::new("cmd-shift-right", MoveLineEndExtending, Some("atomio")),
-            KeyBinding::new("cmd-a", SelectAll, Some("atomio")),
-            KeyBinding::new("cmd-c", Copy, Some("atomio")),
-            KeyBinding::new("cmd-x", Cut, Some("atomio")),
-            KeyBinding::new("cmd-v", Paste, Some("atomio")),
-            KeyBinding::new("backspace", Backspace, Some("atomio")),
-            KeyBinding::new("delete", DeleteForward, Some("atomio")),
-            KeyBinding::new("cmd-z", Undo, Some("atomio")),
-            KeyBinding::new("cmd-shift-z", Redo, Some("atomio")),
-            KeyBinding::new("cmd-shift-p", TogglePalette, Some("atomio")),
-            KeyBinding::new("enter", ConfirmPalette, Some("atomio")),
-            KeyBinding::new("escape", DismissPalette, Some("atomio")),
-            KeyBinding::new("cmd-shift-d", Connect, Some("atomio")),
-            KeyBinding::new("cmd-k", ClearConsole, Some("atomio")),
-            KeyBinding::new("cmd-shift-o", OpenFirstScript, Some("atomio")),
-            KeyBinding::new("f5", DebugResume, Some("atomio")),
-            KeyBinding::new("f10", DebugStepOver, Some("atomio")),
-            KeyBinding::new("f11", DebugStepInto, Some("atomio")),
-            KeyBinding::new("shift-f11", DebugStepOut, Some("atomio")),
-            KeyBinding::new("f6", DebugPause, Some("atomio")),
-            KeyBinding::new("cmd-1", ShowFiles, Some("atomio")),
-            KeyBinding::new("cmd-2", ShowDebugger, Some("atomio")),
-            KeyBinding::new("cmd-3", ShowSimulator, Some("atomio")),
-            KeyBinding::new("cmd-4", ShowComponents, Some("atomio")),
-            KeyBinding::new("cmd-5", ShowProfiler, Some("atomio")),
-            KeyBinding::new("cmd-6", ShowConsole, Some("atomio")),
-            KeyBinding::new("cmd-7", ShowNetwork, Some("atomio")),
-        ]);
+    Application::new()
+        .with_assets(assets::EmbeddedAssets)
+        .run(move |cx| {
+            cx.bind_keys([
+                KeyBinding::new("cmd-o", OpenFile, Some("atomio")),
+                KeyBinding::new("cmd-s", SaveFile, Some("atomio")),
+                KeyBinding::new("left", MoveLeft, Some("atomio")),
+                KeyBinding::new("right", MoveRight, Some("atomio")),
+                KeyBinding::new("up", MoveUp, Some("atomio")),
+                KeyBinding::new("down", MoveDown, Some("atomio")),
+                KeyBinding::new("home", MoveLineStart, Some("atomio")),
+                KeyBinding::new("end", MoveLineEnd, Some("atomio")),
+                KeyBinding::new("cmd-left", MoveLineStart, Some("atomio")),
+                KeyBinding::new("cmd-right", MoveLineEnd, Some("atomio")),
+                KeyBinding::new("shift-left", MoveLeftExtending, Some("atomio")),
+                KeyBinding::new("shift-right", MoveRightExtending, Some("atomio")),
+                KeyBinding::new("shift-up", MoveUpExtending, Some("atomio")),
+                KeyBinding::new("shift-down", MoveDownExtending, Some("atomio")),
+                KeyBinding::new("shift-home", MoveLineStartExtending, Some("atomio")),
+                KeyBinding::new("shift-end", MoveLineEndExtending, Some("atomio")),
+                KeyBinding::new("cmd-shift-left", MoveLineStartExtending, Some("atomio")),
+                KeyBinding::new("cmd-shift-right", MoveLineEndExtending, Some("atomio")),
+                KeyBinding::new("cmd-a", SelectAll, Some("atomio")),
+                KeyBinding::new("cmd-c", Copy, Some("atomio")),
+                KeyBinding::new("cmd-x", Cut, Some("atomio")),
+                KeyBinding::new("cmd-v", Paste, Some("atomio")),
+                KeyBinding::new("backspace", Backspace, Some("atomio")),
+                KeyBinding::new("delete", DeleteForward, Some("atomio")),
+                KeyBinding::new("cmd-z", Undo, Some("atomio")),
+                KeyBinding::new("cmd-shift-z", Redo, Some("atomio")),
+                KeyBinding::new("cmd-shift-p", TogglePalette, Some("atomio")),
+                KeyBinding::new("enter", ConfirmPalette, Some("atomio")),
+                KeyBinding::new("escape", DismissPalette, Some("atomio")),
+                KeyBinding::new("cmd-shift-d", Connect, Some("atomio")),
+                KeyBinding::new("cmd-k", ClearConsole, Some("atomio")),
+                KeyBinding::new("cmd-shift-o", OpenFirstScript, Some("atomio")),
+                KeyBinding::new("f5", DebugResume, Some("atomio")),
+                KeyBinding::new("f10", DebugStepOver, Some("atomio")),
+                KeyBinding::new("f11", DebugStepInto, Some("atomio")),
+                KeyBinding::new("shift-f11", DebugStepOut, Some("atomio")),
+                KeyBinding::new("f6", DebugPause, Some("atomio")),
+                KeyBinding::new("cmd-1", ShowFiles, Some("atomio")),
+                KeyBinding::new("cmd-2", ShowDebugger, Some("atomio")),
+                KeyBinding::new("cmd-3", ShowSimulator, Some("atomio")),
+                KeyBinding::new("cmd-4", ShowComponents, Some("atomio")),
+                KeyBinding::new("cmd-5", ShowProfiler, Some("atomio")),
+                KeyBinding::new("cmd-6", ShowConsole, Some("atomio")),
+                KeyBinding::new("cmd-7", ShowNetwork, Some("atomio")),
+            ]);
 
-        let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("atomio".into()),
-                        // Hide system titlebar so we draw our own 36px bar
-                        // with traffic lights still positioned over it.
-                        appears_transparent: true,
-                        traffic_light_position: Some(point(px(14.0), px(12.0))),
-                    }),
-                    window_background: WindowBackgroundAppearance::Opaque,
-                    ..Default::default()
-                },
-                |_window, cx| {
-                    let state = EditorState::new(buffer.clone());
-                    let commands = build_command_registry();
-                    let bridge = cdp_bridge::spawn();
-                    cx.new(|cx| AtomioWindow {
-                        state,
-                        commands,
-                        status: "cmd+shift+p palette · cmd+shift+d connect · cmd+1..6 panes".into(),
-                        focus_handle: cx.focus_handle(),
-                        palette_query: None,
-                        palette_selected: 0,
-                        console: Console::new(),
-                        connection: ConnectionState::Disconnected,
-                        bridge: Some(bridge),
-                        scripts: ScriptRegistry::new(),
-                        breakpoints: BreakpointRegistry::new(),
-                        paused: false,
-                        call_stack: None,
-                        properties: HashMap::new(),
-                        expanded: HashSet::new(),
-                        next_props_tag: 0,
-                        pending_props_tags: HashMap::new(),
-                        watches: WatchList::new(),
-                        pending_watch_tags: HashMap::new(),
-                        next_watch_tag: 0,
-                        inline_values: HashMap::new(),
-                        network: NetworkRegistry::new(),
-                        selected_request: None,
-                        components: ComponentTree::new(),
-                        selected_node: None,
-                        metrics: Vec::new(),
-                        screenshot_path: None,
-                        screenshot_count: 0,
-                        dock: DockPane::Console,
-                        current_url: None,
-                        event_buf: Vec::new(),
+            let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+            let window = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        titlebar: Some(TitlebarOptions {
+                            title: Some("atomio".into()),
+                            // Hide system titlebar so we draw our own 36px bar
+                            // with traffic lights still positioned over it.
+                            appears_transparent: true,
+                            traffic_light_position: Some(point(px(14.0), px(12.0))),
+                        }),
+                        window_background: WindowBackgroundAppearance::Opaque,
+                        ..Default::default()
+                    },
+                    |_window, cx| {
+                        let state = EditorState::new(buffer.clone());
+                        let commands = build_command_registry();
+                        let bridge = cdp_bridge::spawn();
+                        cx.new(|cx| AtomioWindow {
+                            state,
+                            commands,
+                            status: "cmd+shift+p palette · cmd+shift+d connect · cmd+1..6 panes"
+                                .into(),
+                            focus_handle: cx.focus_handle(),
+                            palette_query: None,
+                            palette_selected: 0,
+                            console: Console::new(),
+                            connection: ConnectionState::Disconnected,
+                            bridge: Some(bridge),
+                            scripts: ScriptRegistry::new(),
+                            breakpoints: BreakpointRegistry::new(),
+                            paused: false,
+                            call_stack: None,
+                            properties: HashMap::new(),
+                            expanded: HashSet::new(),
+                            next_props_tag: 0,
+                            pending_props_tags: HashMap::new(),
+                            watches: WatchList::new(),
+                            pending_watch_tags: HashMap::new(),
+                            next_watch_tag: 0,
+                            inline_values: HashMap::new(),
+                            network: NetworkRegistry::new(),
+                            selected_request: None,
+                            components: ComponentTree::new(),
+                            selected_node: None,
+                            metrics: Vec::new(),
+                            screenshot_path: None,
+                            screenshot_count: 0,
+                            dock: DockPane::Console,
+                            current_url: None,
+                            event_buf: Vec::new(),
+                        })
+                    },
+                )
+                .expect("failed to open atomio window");
+
+            window
+                .update(cx, |view, window, cx| {
+                    window.focus(&view.focus_handle);
+                    // Spawn a low-frequency tick task that nudges the window
+                    // to drain the bridge channels and re-render. The render
+                    // method itself does the drain; this just keeps the wheel
+                    // turning when no other event is firing.
+                    cx.spawn(async move |this, cx| loop {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(100))
+                            .await;
+                        if this.update(cx, |_, cx| cx.notify()).is_err() {
+                            break;
+                        }
                     })
-                },
-            )
-            .expect("failed to open atomio window");
-
-        window
-            .update(cx, |view, window, cx| {
-                window.focus(&view.focus_handle);
-                // Spawn a low-frequency tick task that nudges the window
-                // to drain the bridge channels and re-render. The render
-                // method itself does the drain; this just keeps the wheel
-                // turning when no other event is firing.
-                cx.spawn(async move |this, cx| loop {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(100))
-                        .await;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
-                        break;
-                    }
+                    .detach();
                 })
-                .detach();
-            })
-            .ok();
+                .ok();
 
-        cx.activate(true);
-    });
+            cx.activate(true);
+        });
 }
