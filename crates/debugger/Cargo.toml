@@ -14,4 +14,6 @@ url = "2"
 tracing = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
