@@ -1052,6 +1052,7 @@ impl AtomioWindow {
         self.metrics.clear();
         self.screenshot_path = None;
         self.screenshot_count = 0;
+        trim_screenshots(true);
         cx.notify();
     }
 
@@ -1518,6 +1519,7 @@ impl AtomioWindow {
                                     )
                                     .into();
                                     self.screenshot_path = Some(path);
+                                    trim_screenshots(false);
                                 }
                                 Err(e) => {
                                     self.status = format!("write screenshot: {e}").into();
@@ -2357,7 +2359,7 @@ impl AtomioWindow {
         detail
     }
 
-    /// Console body (entries list). Used by [`render_dock`] when console
+    /// Console body (entries list). Used by `render_dock` when console
     /// pane is active.
     /// Simulator pane body. Capture button + phone-frame border that
     /// renders the most recent screenshot via gpui's image loader. Live
@@ -2992,13 +2994,51 @@ fn load_initial_buffer() -> Buffer {
 /// Resolve the path where atomio's diagnostic log lives, creating parent
 /// directories if needed. Mirrors the macOS convention
 /// `~/Library/Logs/atomio/atomio.log`.
+/// Directory where simulator screenshots are cached.
+fn screenshot_dir() -> PathBuf {
+    dirs::cache_dir()
+        .map(|c| c.join("atomio").join("screenshots"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/atomio/screenshots"))
+}
+
 /// Path where the simulator pane writes captured PNG frames. Filename
 /// includes the count so gpui's image cache reloads (it keys by path).
 fn screenshot_path_for(seq: u64) -> PathBuf {
-    let base = dirs::cache_dir()
-        .map(|c| c.join("atomio").join("screenshots"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/atomio/screenshots"));
-    base.join(format!("frame-{seq}.png"))
+    screenshot_dir().join(format!("frame-{seq}.png"))
+}
+
+/// Maximum captured frames kept on disk before older ones are evicted.
+const SCREENSHOT_CAP: usize = 50;
+
+/// Delete the oldest captured frames so at most [`SCREENSHOT_CAP`] remain.
+/// Called after each capture and on disconnect (with `wipe = true`).
+fn trim_screenshots(wipe: bool) {
+    let dir = screenshot_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut files: Vec<(std::path::PathBuf, std::time::SystemTime)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            let t = m.modified().ok()?;
+            Some((e.path(), t))
+        })
+        .collect();
+    if wipe {
+        for (p, _) in &files {
+            let _ = std::fs::remove_file(p);
+        }
+        return;
+    }
+    if files.len() <= SCREENSHOT_CAP {
+        return;
+    }
+    files.sort_by_key(|(_, t)| *t);
+    let drop_count = files.len() - SCREENSHOT_CAP;
+    for (p, _) in files.iter().take(drop_count) {
+        let _ = std::fs::remove_file(p);
+    }
 }
 
 fn log_file_path() -> PathBuf {
