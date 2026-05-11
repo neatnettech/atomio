@@ -278,6 +278,18 @@ impl EditorState {
         self.set_head(self.head_line_end(), false);
     }
 
+    /// Move caret to an absolute `(line, col)` position. Both are
+    /// 0-indexed and clamped to the buffer (lines beyond EOF land on
+    /// the last line; cols beyond line length land at end-of-line).
+    /// Clears any active selection.
+    pub fn move_cursor_to(&mut self, line: usize, col: usize) {
+        let last_line = self.buffer.len_lines().saturating_sub(1);
+        let target_line = line.min(last_line);
+        let line_start = self.buffer.line_to_char(target_line);
+        let clamped_col = col.min(self.buffer.line_len(target_line));
+        self.set_head(line_start + clamped_col, false);
+    }
+
     // --- extending moves: preserve anchor -------------------------------
 
     pub fn move_left_extending(&mut self) {
@@ -479,6 +491,39 @@ mod tests {
         assert_eq!(st.cursor_line_col(), (1, 0));
         st.move_line_end();
         assert_eq!(st.cursor_line_col(), (1, 3));
+    }
+
+    #[test]
+    fn move_cursor_to_absolute_position() {
+        let mut st = state_from("abc\ndefgh\nij");
+        st.move_cursor_to(1, 3);
+        assert_eq!(st.cursor_line_col(), (1, 3));
+        assert!(st.selection.is_caret());
+    }
+
+    #[test]
+    fn move_cursor_to_clamps_col_to_line_end() {
+        let mut st = state_from("abc\ndef");
+        st.move_cursor_to(1, 999);
+        assert_eq!(st.cursor_line_col(), (1, 3));
+    }
+
+    #[test]
+    fn move_cursor_to_clamps_line_to_last() {
+        let mut st = state_from("abc\ndef");
+        st.move_cursor_to(99, 0);
+        assert_eq!(st.cursor_line_col(), (1, 0));
+    }
+
+    #[test]
+    fn move_cursor_to_clears_selection() {
+        let mut st = state_from("abc\ndef");
+        st.move_right_extending();
+        st.move_right_extending();
+        assert!(!st.selection.is_caret());
+        st.move_cursor_to(1, 1);
+        assert!(st.selection.is_caret());
+        assert_eq!(st.cursor_line_col(), (1, 1));
     }
 
     #[test]

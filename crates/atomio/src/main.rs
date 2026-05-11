@@ -205,6 +205,10 @@ struct AtomioWindow {
     /// CDP source URL of the currently displayed buffer (when fetched from
     /// Metro). Required to scope breakpoints + match paused locations.
     current_url: Option<String>,
+    /// `(url, line)` requested by a frame click while the buffer wasn't
+    /// loaded yet. Applied once the matching [`DebuggerEvent::SourceFetched`]
+    /// arrives, then cleared. Only the most recent click survives.
+    pending_jump: Option<(String, u32)>,
     /// Reusable scratch buffer for `drain_bridge_events`. Carried across
     /// renders to amortise allocation when the bridge produces a steady
     /// stream of events (console logs / network ticks). Empty between
@@ -729,6 +733,31 @@ impl AtomioWindow {
         }
         cx.notify();
     }
+    /// Jump the editor to a specific call-frame location. Resolves the
+    /// frame's `script_id` to a CDP URL via the script registry; if the
+    /// script is not already loaded as the current buffer, kicks off a
+    /// `FetchSource` request and parks the requested line on a pending
+    /// jump (handled when the source arrives). When already loaded,
+    /// moves the caret immediately.
+    pub(crate) fn jump_to_frame(&mut self, script_id: String, line: u32, cx: &mut Context<Self>) {
+        let Some(script) = self.scripts.get(&script_id) else {
+            self.status = format!("frame script {script_id} unknown to registry").into();
+            cx.notify();
+            return;
+        };
+        let url = script.url.clone();
+        if self.current_url.as_deref() == Some(url.as_str()) {
+            self.state.move_cursor_to(line as usize, 0);
+        } else if let Some(bridge) = &self.bridge {
+            self.pending_jump = Some((url.clone(), line));
+            let _ = bridge
+                .commands
+                .send(DebuggerCommand::FetchSource { url: url.clone() });
+            self.status = format!("opening {url}:{}", line + 1).into();
+        }
+        cx.notify();
+    }
+
     fn on_open_first_script(
         &mut self,
         _: &OpenFirstScript,
@@ -1155,7 +1184,15 @@ impl AtomioWindow {
                             self.state.set_read_only(true);
                             self.status =
                                 format!("loaded {url} ({} chars)", text.chars().count()).into();
-                            self.current_url = Some(url);
+                            self.current_url = Some(url.clone());
+                            // Honour any pending frame-click jump that
+                            // requested this exact URL. Old pending
+                            // entries for other URLs are dropped.
+                            if let Some((pending_url, line)) = self.pending_jump.take() {
+                                if pending_url == url {
+                                    self.state.move_cursor_to(line as usize, 0);
+                                }
+                            }
                         }
                         Err(e) => {
                             self.status = format!("fetch failed: {url}: {e}").into();
@@ -1562,6 +1599,7 @@ fn main() {
                             screenshot_count: 0,
                             dock: DockPane::Console,
                             current_url: None,
+                            pending_jump: None,
                             event_buf: Vec::new(),
                         })
                     },
