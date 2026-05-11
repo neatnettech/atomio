@@ -831,20 +831,28 @@ impl AtomioWindow {
                 .unwrap_or(&f.script_id);
             let basename = url.rsplit_once('/').map(|(_, b)| b).unwrap_or(url);
             let row_color = if i == 0 { theme::TX_1 } else { theme::TX_2 };
+            let script_id_for_click = f.script_id.clone();
+            let line_for_click = f.line;
             frames_section = frames_section.child(
                 div()
+                    .id(SharedString::from(format!("frame-{i}")))
                     .flex()
                     .flex_row()
                     .justify_between()
                     .text_xs()
                     .text_color(rgb(row_color))
                     .py_1()
+                    .rounded(px(3.0))
+                    .hover(|s| s.bg(rgb(theme::BG_3)))
                     .child(div().child(name.to_string()))
                     .child(div().text_color(rgb(theme::TX_4)).child(format!(
                         "{}:{}",
                         basename,
                         f.line + 1
-                    ))),
+                    )))
+                    .on_click(cx.listener(move |this, _ev, _win, cx| {
+                        this.jump_to_frame(script_id_for_click.clone(), line_for_click, cx);
+                    })),
             );
         }
 
