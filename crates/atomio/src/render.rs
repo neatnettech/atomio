@@ -1783,6 +1783,7 @@ impl Render for AtomioWindow {
             .key_context("atomio")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_open))
+            .on_action(cx.listener(Self::on_open_project))
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_move_left))
             .on_action(cx.listener(Self::on_move_right))

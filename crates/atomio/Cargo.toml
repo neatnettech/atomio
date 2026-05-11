@@ -16,6 +16,7 @@ console.workspace = true
 inspector.workspace = true
 network.workspace = true
 react_tree.workspace = true
+workspace.workspace = true
 gpui = "0.2"
 rfd = "0.17"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net"] }

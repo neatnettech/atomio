@@ -441,6 +441,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "workspace",
 ]
 
 [[package]]
