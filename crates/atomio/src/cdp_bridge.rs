@@ -203,34 +203,43 @@ pub fn spawn() -> DebuggerBridge {
     }
 }
 
-/// Pending CDP request id → local breakpoint id awaiting response.
-/// Populated when we send `Debugger.setBreakpointByUrl`; drained when the
-/// matching response arrives in the event forwarder.
-type PendingBreakpoints = Arc<Mutex<HashMap<u64, BreakpointId>>>;
-/// CDP request id → caller-supplied tag awaiting a `Runtime.getProperties`
-/// response.
-type PendingProperties = Arc<Mutex<HashMap<u64, u64>>>;
-/// CDP request id → caller-supplied tag awaiting a watch evaluation.
-type PendingWatches = Arc<Mutex<HashMap<u64, u64>>>;
-/// CDP request id → identifier being evaluated for inline display.
-type PendingInline = Arc<Mutex<HashMap<u64, String>>>;
-/// Pending Performance.getMetrics request ids (just IDs; result is
-/// always emitted as `PerformanceMetrics`).
-type PendingMetrics = Arc<Mutex<std::collections::HashSet<u64>>>;
-/// Pending Page.captureScreenshot request ids.
-type PendingScreenshots = Arc<Mutex<std::collections::HashSet<u64>>>;
+/// What a pending CDP request expects back. One enum unifies what used to
+/// be six parallel `HashMap`s keyed by request id; a single lookup in the
+/// response handler picks the right route. Eliminates the possibility of
+/// silently misrouting a response when two maps somehow share an id, and
+/// keeps the bookkeeping in one place when adding new request kinds.
+#[derive(Debug)]
+enum PendingRequest {
+    /// `Debugger.setBreakpointByUrl` — carries the local id we tagged the
+    /// breakpoint with on send.
+    Breakpoint(BreakpointId),
+    /// `Runtime.getProperties` — caller-supplied tag (UI keys it to an
+    /// `objectId` in its own map).
+    Properties(u64),
+    /// `Debugger.evaluateOnCallFrame` for a watch expression — caller tag
+    /// (UI keys it to a watch index).
+    Watch(u64),
+    /// `Debugger.evaluateOnCallFrame` for an inline value — identifier
+    /// name being evaluated.
+    Inline(String),
+    /// `Performance.getMetrics` — no payload; presence == "this is a
+    /// metrics response".
+    Metrics,
+    /// `Page.captureScreenshot` — no payload; presence == "this is a
+    /// screenshot response".
+    Screenshot,
+}
+
+/// Pending CDP requests, keyed by request id. Drained in the response
+/// handler when matching ids arrive on the wire.
+type Pending = Arc<Mutex<HashMap<u64, PendingRequest>>>;
 
 /// The worker's async main loop. One outstanding CDP connection at a time.
 async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerEvent>) {
     // Transport held in Arc so command handlers and the event forwarder can
     // both reach it. `None` until Connect succeeds; cleared on Disconnect.
     let transport: Arc<Mutex<Option<Arc<CdpTransport>>>> = Arc::new(Mutex::new(None));
-    let pending: PendingBreakpoints = Arc::new(Mutex::new(HashMap::new()));
-    let pending_props: PendingProperties = Arc::new(Mutex::new(HashMap::new()));
-    let pending_watches: PendingWatches = Arc::new(Mutex::new(HashMap::new()));
-    let pending_inline: PendingInline = Arc::new(Mutex::new(HashMap::new()));
-    let pending_metrics: PendingMetrics = Arc::new(Mutex::new(Default::default()));
-    let pending_shots: PendingScreenshots = Arc::new(Mutex::new(Default::default()));
+    let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
         // Block on a command from the UI. Channel close = shutdown.
@@ -255,27 +264,20 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                 });
             }
             DebuggerCommand::Connect => {
-                connect(
-                    &transport,
-                    &pending,
-                    &pending_props,
-                    &pending_watches,
-                    &pending_inline,
-                    &pending_metrics,
-                    &pending_shots,
-                    &evt_tx,
-                )
-                .await;
+                connect(&transport, &pending, &evt_tx).await;
             }
             DebuggerCommand::CaptureScreenshot => {
                 let Some(t) = transport.lock().await.clone() else {
                     continue;
                 };
                 let req = page_capture_screenshot();
-                pending_shots.lock().await.insert(req.id);
+                pending
+                    .lock()
+                    .await
+                    .insert(req.id, PendingRequest::Screenshot);
                 if let Err(e) = t.send(&req).await {
                     warn!(target: "atomio::bridge", error = %e, "send captureScreenshot failed");
-                    pending_shots.lock().await.remove(&req.id);
+                    pending.lock().await.remove(&req.id);
                 }
             }
             DebuggerCommand::GetPerformanceMetrics => {
@@ -283,10 +285,10 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                     continue;
                 };
                 let req = performance_get_metrics();
-                pending_metrics.lock().await.insert(req.id);
+                pending.lock().await.insert(req.id, PendingRequest::Metrics);
                 if let Err(e) = t.send(&req).await {
                     warn!(target: "atomio::bridge", error = %e, "send getMetrics failed");
-                    pending_metrics.lock().await.remove(&req.id);
+                    pending.lock().await.remove(&req.id);
                 }
             }
             DebuggerCommand::SetBreakpoint {
@@ -310,7 +312,10 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                     line,
                     "-> setBreakpointByUrl"
                 );
-                pending.lock().await.insert(req_id, local);
+                pending
+                    .lock()
+                    .await
+                    .insert(req_id, PendingRequest::Breakpoint(local));
                 if let Err(e) = t.send(&req).await {
                     warn!(target: "atomio::bridge", error = %e, "send setBreakpointByUrl failed");
                     pending.lock().await.remove(&req_id);
@@ -332,10 +337,13 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                 };
                 let req = evaluate_on_call_frame(&call_frame_id, &ident);
                 let req_id = req.id;
-                pending_inline.lock().await.insert(req_id, ident);
+                pending
+                    .lock()
+                    .await
+                    .insert(req_id, PendingRequest::Inline(ident));
                 if let Err(e) = t.send(&req).await {
                     warn!(target: "atomio::bridge", error = %e, "send inline eval failed");
-                    pending_inline.lock().await.remove(&req_id);
+                    pending.lock().await.remove(&req_id);
                 }
             }
             DebuggerCommand::EvaluateWatch {
@@ -355,10 +363,13 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                     expression = %expression,
                     "-> evaluateOnCallFrame"
                 );
-                pending_watches.lock().await.insert(req_id, tag);
+                pending
+                    .lock()
+                    .await
+                    .insert(req_id, PendingRequest::Watch(tag));
                 if let Err(e) = t.send(&req).await {
                     warn!(target: "atomio::bridge", error = %e, "send evaluateOnCallFrame failed");
-                    pending_watches.lock().await.remove(&req_id);
+                    pending.lock().await.remove(&req_id);
                 }
             }
             DebuggerCommand::GetProperties {
@@ -378,10 +389,13 @@ async fn worker_loop(cmd_rx: Receiver<DebuggerCommand>, evt_tx: Sender<DebuggerE
                     object_id = %object_id,
                     "-> getProperties"
                 );
-                pending_props.lock().await.insert(req_id, tag);
+                pending
+                    .lock()
+                    .await
+                    .insert(req_id, PendingRequest::Properties(tag));
                 if let Err(e) = t.send(&req).await {
                     warn!(target: "atomio::bridge", error = %e, "send getProperties failed");
-                    pending_props.lock().await.remove(&req_id);
+                    pending.lock().await.remove(&req_id);
                 }
             }
             DebuggerCommand::Resume => send_no_args(&transport, debugger_resume(), "resume").await,
@@ -414,15 +428,9 @@ async fn send_no_args(
 }
 
 /// Establish a CDP connection and spawn the event forwarder.
-#[allow(clippy::too_many_arguments)]
 async fn connect(
     transport_slot: &Arc<Mutex<Option<Arc<CdpTransport>>>>,
-    pending: &PendingBreakpoints,
-    pending_props: &PendingProperties,
-    pending_watches: &PendingWatches,
-    pending_inline: &PendingInline,
-    pending_metrics: &PendingMetrics,
-    pending_shots: &PendingScreenshots,
+    pending: &Pending,
     evt_tx: &Sender<DebuggerEvent>,
 ) {
     info!(target: "atomio::bridge", "connect requested");
@@ -491,11 +499,6 @@ async fn connect(
     let mut events = transport.subscribe();
     let evt_tx = evt_tx.clone();
     let pending = pending.clone();
-    let pending_props = pending_props.clone();
-    let pending_watches = pending_watches.clone();
-    let pending_inline = pending_inline.clone();
-    let pending_metrics = pending_metrics.clone();
-    let pending_shots = pending_shots.clone();
     tokio::spawn(async move {
         while let Ok(msg) = events.recv().await {
             match msg {
@@ -547,10 +550,14 @@ async fn connect(
                     _ => {}
                 },
                 CdpMessage::Response { id, result } => {
-                    // Match against pending breakpoint requests.
-                    let local_bp = pending.lock().await.remove(&id);
-                    if let Some(local) = local_bp {
-                        match result {
+                    // Single lookup routes to the right handler. If id
+                    // isn't pending we just drop the response (could be
+                    // an enable/handshake ack we don't track).
+                    let Some(entry) = pending.lock().await.remove(&id) else {
+                        continue;
+                    };
+                    match entry {
+                        PendingRequest::Breakpoint(local) => match result {
                             Ok(value) => {
                                 if let Some((server_id, line)) =
                                     parse_set_breakpoint_response(&value)
@@ -570,13 +577,8 @@ async fn connect(
                                     "setBreakpointByUrl error"
                                 );
                             }
-                        }
-                        continue;
-                    }
-                    // Match against pending getProperties requests.
-                    let prop_tag = pending_props.lock().await.remove(&id);
-                    if let Some(tag) = prop_tag {
-                        match result {
+                        },
+                        PendingRequest::Properties(tag) => match result {
                             Ok(value) => {
                                 let properties = Property::parse_response(&value);
                                 let _ = evt_tx.send(DebuggerEvent::Properties { tag, properties });
@@ -589,40 +591,28 @@ async fn connect(
                                     "getProperties error"
                                 );
                             }
+                        },
+                        PendingRequest::Watch(tag) => {
+                            let result = decode_evaluate(result);
+                            let _ = evt_tx.send(DebuggerEvent::WatchEvaluated { tag, result });
                         }
-                        continue;
-                    }
-                    // Match against pending watch evaluations.
-                    let watch_tag = pending_watches.lock().await.remove(&id);
-                    if let Some(tag) = watch_tag {
-                        let result = decode_evaluate(result);
-                        let _ = evt_tx.send(DebuggerEvent::WatchEvaluated { tag, result });
-                        continue;
-                    }
-                    // Match against pending inline-value evaluations.
-                    let inline_ident = pending_inline.lock().await.remove(&id);
-                    if let Some(ident) = inline_ident {
-                        let result = decode_evaluate(result);
-                        let _ = evt_tx.send(DebuggerEvent::InlineEvaluated { ident, result });
-                        continue;
-                    }
-                    // Match against pending metrics requests.
-                    let was_metrics = pending_metrics.lock().await.remove(&id);
-                    if was_metrics {
-                        if let Ok(value) = result {
-                            let metrics = parse_metrics(&value);
-                            let _ = evt_tx.send(DebuggerEvent::PerformanceMetrics(metrics));
+                        PendingRequest::Inline(ident) => {
+                            let result = decode_evaluate(result);
+                            let _ = evt_tx.send(DebuggerEvent::InlineEvaluated { ident, result });
                         }
-                        continue;
-                    }
-                    // Match against pending screenshot requests.
-                    let was_shot = pending_shots.lock().await.remove(&id);
-                    if was_shot {
-                        if let Ok(value) = result {
-                            if let Some(data) = value.get("data").and_then(|v| v.as_str()) {
-                                let _ = evt_tx.send(DebuggerEvent::ScreenshotCaptured {
-                                    data_base64: data.to_string(),
-                                });
+                        PendingRequest::Metrics => {
+                            if let Ok(value) = result {
+                                let metrics = parse_metrics(&value);
+                                let _ = evt_tx.send(DebuggerEvent::PerformanceMetrics(metrics));
+                            }
+                        }
+                        PendingRequest::Screenshot => {
+                            if let Ok(value) = result {
+                                if let Some(data) = value.get("data").and_then(|v| v.as_str()) {
+                                    let _ = evt_tx.send(DebuggerEvent::ScreenshotCaptured {
+                                        data_base64: data.to_string(),
+                                    });
+                                }
                             }
                         }
                     }
@@ -752,5 +742,42 @@ mod tests {
     #[test]
     fn parse_metrics_missing_returns_empty() {
         assert!(parse_metrics(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn pending_map_routes_each_variant_independently() {
+        // Each variant gets its own request id and survives lookup of the
+        // others. Catches regressions where the response handler shared
+        // state across kinds.
+        let mut p: HashMap<u64, PendingRequest> = HashMap::new();
+        p.insert(1, PendingRequest::Breakpoint(BreakpointId(7)));
+        p.insert(2, PendingRequest::Properties(42));
+        p.insert(3, PendingRequest::Watch(11));
+        p.insert(4, PendingRequest::Inline("foo".to_string()));
+        p.insert(5, PendingRequest::Metrics);
+        p.insert(6, PendingRequest::Screenshot);
+
+        assert!(
+            matches!(p.remove(&1), Some(PendingRequest::Breakpoint(b)) if b == BreakpointId(7))
+        );
+        assert!(matches!(p.remove(&2), Some(PendingRequest::Properties(42))));
+        assert!(matches!(p.remove(&3), Some(PendingRequest::Watch(11))));
+        assert!(matches!(p.remove(&4), Some(PendingRequest::Inline(s)) if s == "foo"));
+        assert!(matches!(p.remove(&5), Some(PendingRequest::Metrics)));
+        assert!(matches!(p.remove(&6), Some(PendingRequest::Screenshot)));
+        assert!(p.is_empty());
+        // Unknown id is a no-op — response handler relies on this.
+        assert!(p.remove(&99).is_none());
+    }
+
+    #[test]
+    fn pending_map_insert_collision_overwrites() {
+        // Two inserts at the same id => second wins. Request ids come from
+        // a global atomic counter so this can't happen in practice, but
+        // the test documents the behaviour explicitly.
+        let mut p: HashMap<u64, PendingRequest> = HashMap::new();
+        p.insert(1, PendingRequest::Metrics);
+        p.insert(1, PendingRequest::Screenshot);
+        assert!(matches!(p.remove(&1), Some(PendingRequest::Screenshot)));
     }
 }
