@@ -46,6 +46,14 @@ impl CommandRegistry {
         });
     }
 
+    /// Remove every command whose `id` starts with `prefix`. Used by
+    /// the atomio shell to re-seed the "Recent #N" entries after the
+    /// recents list mutates without dragging the whole registry
+    /// through a rebuild.
+    pub fn unregister_prefix(&mut self, prefix: &str) {
+        self.commands.retain(|c| !c.id.starts_with(prefix));
+    }
+
     /// Return all commands whose label fuzzy-matches `query`, ranked by
     /// score (higher is better). An empty query returns everything.
     pub fn search(&self, query: &str) -> Vec<Match> {
@@ -121,6 +129,17 @@ fn fuzzy_score(label: &str, query: &[char]) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unregister_prefix_drops_matching_ids() {
+        let mut reg = CommandRegistry::new();
+        reg.register("File: Open", "open");
+        reg.register("File: Recent #0", "open_recent:0");
+        reg.register("File: Recent #1", "open_recent:1");
+        reg.unregister_prefix("open_recent:");
+        let ids: Vec<_> = reg.search("").into_iter().map(|m| m.command.id).collect();
+        assert_eq!(ids, vec!["open"]);
+    }
 
     #[test]
     fn empty_query_returns_all() {
