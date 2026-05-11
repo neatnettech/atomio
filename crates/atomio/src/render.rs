@@ -10,7 +10,8 @@
 //! widen their visibility.
 
 use gpui::{
-    div, prelude::*, px, rgb, Context, FocusHandle, Focusable, Render, SharedString, Window,
+    div, linear_color_stop, linear_gradient, prelude::*, px, rgb, Context, FocusHandle, Focusable,
+    Render, SharedString, Window,
 };
 use language::{HighlightKind, Span};
 
@@ -386,8 +387,9 @@ pub(crate) fn placeholder(label: impl Into<SharedString>) -> gpui::Div {
 
 impl AtomioWindow {
     /// Activity bar (left rail). Per `docs/design.md`: 48px wide, 36x36
-    /// items, accent left-edge indicator on active.
-    pub(crate) fn render_activity_bar(&self) -> gpui::Div {
+    /// items, 2px accent indicator on the left edge of the active row,
+    /// hover lifts to BG_3. Each row is clickable to switch the dock.
+    pub(crate) fn render_activity_bar(&self, cx: &mut Context<Self>) -> gpui::Div {
         let active = self.dock;
         let items = [
             DockPane::Files,
@@ -415,19 +417,46 @@ impl AtomioWindow {
             } else {
                 (theme::TX_3, theme::BG_2)
             };
-            bar = bar.child(
-                div()
-                    .w(px(36.0))
-                    .h(px(36.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .text_xs()
-                    .text_color(rgb(fg))
-                    .bg(rgb(bg))
-                    .child(pane.glyph()),
-            );
+            // Per-row layout: 2px accent strip + 4px gap + 36x36 icon
+            // cell. The strip is invisible (BG_2) on inactive rows so the
+            // icons stay vertically aligned regardless of selection.
+            let indicator_color = if is_active {
+                theme::ACCENT
+            } else {
+                theme::BG_2
+            };
+            let pane_for_click = pane;
+            let row = div()
+                .id(SharedString::from(format!("act-{}", pane.label())))
+                .flex()
+                .flex_row()
+                .items_center()
+                .child(
+                    div()
+                        .w(px(2.0))
+                        .h(px(20.0))
+                        .rounded(px(1.0))
+                        .bg(rgb(indicator_color)),
+                )
+                .child(
+                    div()
+                        .ml(px(4.0))
+                        .w(px(36.0))
+                        .h(px(36.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.0))
+                        .text_xs()
+                        .text_color(rgb(fg))
+                        .bg(rgb(bg))
+                        .hover(|s| if is_active { s } else { s.bg(rgb(theme::BG_3)) })
+                        .child(pane.glyph()),
+                )
+                .on_click(cx.listener(move |this, _ev, _win, cx| {
+                    this.show_dock(pane_for_click, cx);
+                }));
+            bar = bar.child(row);
         }
         bar
     }
@@ -935,6 +964,19 @@ impl AtomioWindow {
             .flex_col()
             .items_center()
             .gap_1()
+            .border_1()
+            .border_color(rgb(if enabled {
+                theme::LINE_2
+            } else {
+                theme::LINE_1
+            }))
+            .hover(|s| {
+                if enabled {
+                    s.bg(rgb(theme::BG_4)).border_color(rgb(theme::ACCENT_LINE))
+                } else {
+                    s
+                }
+            })
             .child(div().child(glyph))
             .child(div().text_color(rgb(theme::TX_4)).child(shortcut))
             .on_click(cx.listener(move |this, _ev, _win, cx| {
@@ -1583,7 +1625,15 @@ impl Render for AtomioWindow {
                     .items_center()
                     .justify_center()
                     .px_4()
-                    .bg(rgb(theme::BG_2))
+                    // Spec: linear-gradient(180deg, #1a1f27 0%, #14181f 100%).
+                    // gpui angle: 0 = top -> increasing clockwise, so 180 =
+                    // bottom. We want the lighter shade at the top, so the
+                    // gradient line points down (angle 180) with TOP at 0%.
+                    .bg(linear_gradient(
+                        180.0,
+                        linear_color_stop(rgb(theme::TITLEBAR_TOP), 0.0),
+                        linear_color_stop(rgb(theme::TITLEBAR_BOT), 1.0),
+                    ))
                     .border_b_1()
                     .border_color(rgb(theme::LINE_1))
                     .child(
@@ -1602,7 +1652,7 @@ impl Render for AtomioWindow {
                     .flex_1()
                     .flex()
                     .flex_row()
-                    .child(self.render_activity_bar())
+                    .child(self.render_activity_bar(cx))
                     .child(self.render_editor_pane(line_views, gutter_width, cx))
                     .child(self.render_dock(cx)),
             )
