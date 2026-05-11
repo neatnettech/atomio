@@ -35,11 +35,13 @@ use language::{highlight, HighlightKind, Language};
 use network::{NetworkRegistry, WsDirection};
 use react_tree::{ComponentTree, NodeId};
 use tracing::debug;
+use workspace::{Recents, Workspace};
 
 actions!(
     atomio,
     [
         OpenFile,
+        OpenProject,
         SaveFile,
         MoveLeft,
         MoveRight,
@@ -205,6 +207,13 @@ struct AtomioWindow {
     /// CDP source URL of the currently displayed buffer (when fetched from
     /// Metro). Required to scope breakpoints + match paused locations.
     current_url: Option<String>,
+    /// Currently opened project workspace, if any. `None` when atomio
+    /// launched without a project (single-file mode) or before the user
+    /// picks one via `OpenProject`.
+    workspace: Option<Workspace>,
+    /// Recently opened projects. Persisted to disk in a follow-up PR;
+    /// for now lives in memory for the duration of the session.
+    recents: Recents,
     /// `(url, line)` requested by a frame click while the buffer wasn't
     /// loaded yet. Applied once the matching [`DebuggerEvent::SourceFetched`]
     /// arrives, then cleared. Only the most recent click survives.
@@ -219,6 +228,7 @@ struct AtomioWindow {
 fn build_command_registry() -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     reg.register("File: Open", "open_file");
+    reg.register("File: Open Project…", "open_project");
     reg.register("File: Save", "save_file");
     reg.register("Edit: Undo", "undo");
     reg.register("Edit: Redo", "redo");
@@ -260,15 +270,30 @@ impl AtomioWindow {
     }
 
     fn subtitle(&self) -> SharedString {
+        let dirty = if self.state.buffer.is_dirty() {
+            " •"
+        } else {
+            ""
+        };
+        // When a project is open, prefer "project · relative/path" so
+        // the titlebar conveys both the workspace and the open file.
+        // Falls back to the absolute path or the default tagline when
+        // no project / no buffer path is set.
+        if let Some(ws) = self.workspace.as_ref() {
+            let name = ws.display_name();
+            let rel = self
+                .state
+                .buffer
+                .path()
+                .and_then(|p| p.strip_prefix(ws.root()).ok())
+                .map(|p| p.display().to_string());
+            return match rel {
+                Some(r) if !r.is_empty() => format!("{name} · {r}{dirty}").into(),
+                _ => format!("{name}{dirty}").into(),
+            };
+        }
         match self.state.buffer.path() {
-            Some(p) => {
-                let suffix = if self.state.buffer.is_dirty() {
-                    " •"
-                } else {
-                    ""
-                };
-                format!("{}{suffix}", p.display()).into()
-            }
+            Some(p) => format!("{}{dirty}", p.display()).into(),
             None => "hackable to the core. again.".into(),
         }
     }
@@ -374,6 +399,49 @@ impl AtomioWindow {
                     }
                     Err(e) => {
                         this.status = format!("open failed: {e}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Open a project directory via the native picker. Spawned on the
+    /// gpui run loop per the rfd safety rule. On success: replaces
+    /// `self.workspace`, bumps the recents list, updates the status
+    /// bar, and switches the dock to the file tree pane so the user
+    /// lands somewhere visibly different.
+    fn on_open_project(&mut self, _: &OpenProject, _window: &mut Window, cx: &mut Context<Self>) {
+        self.status = "opening project…".into();
+        cx.spawn(async move |this, cx| {
+            let picked = rfd::AsyncFileDialog::new()
+                .set_title("Open project")
+                .pick_folder()
+                .await;
+            let Some(folder) = picked else {
+                let _ = this.update(cx, |this, cx| {
+                    this.status = "open project cancelled".into();
+                    cx.notify();
+                });
+                return;
+            };
+            let root = folder.path().to_path_buf();
+            let result = Workspace::open(&root);
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(ws) => {
+                        let name = ws.display_name();
+                        let kind = ws.kind();
+                        let file_count = ws.files().len();
+                        this.recents.push(ws.root().to_path_buf(), name.clone());
+                        this.workspace = Some(ws);
+                        this.dock = DockPane::Files;
+                        this.status =
+                            format!("opened {name} ({kind:?}, {file_count} files)").into();
+                    }
+                    Err(e) => {
+                        this.status = format!("open project failed: {e}").into();
                     }
                 }
                 cx.notify();
@@ -679,6 +747,7 @@ impl AtomioWindow {
     fn dispatch_command(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         match id {
             "open_file" => self.on_open(&OpenFile, window, cx),
+            "open_project" => self.on_open_project(&OpenProject, window, cx),
             "save_file" => self.on_save(&SaveFile, window, cx),
             "undo" => self.on_undo(&Undo, window, cx),
             "redo" => self.on_redo(&Redo, window, cx),
@@ -1539,7 +1608,7 @@ fn main() {
                 KeyBinding::new("escape", DismissPalette, Some("atomio")),
                 KeyBinding::new("cmd-shift-d", Connect, Some("atomio")),
                 KeyBinding::new("cmd-k", ClearConsole, Some("atomio")),
-                KeyBinding::new("cmd-shift-o", OpenFirstScript, Some("atomio")),
+                KeyBinding::new("cmd-shift-o", OpenProject, Some("atomio")),
                 KeyBinding::new("f5", DebugResume, Some("atomio")),
                 KeyBinding::new("f10", DebugStepOver, Some("atomio")),
                 KeyBinding::new("f11", DebugStepInto, Some("atomio")),
@@ -1605,6 +1674,8 @@ fn main() {
                             screenshot_count: 0,
                             dock: DockPane::Console,
                             current_url: None,
+                            workspace: None,
+                            recents: Recents::new(),
                             pending_jump: None,
                             event_buf: Vec::new(),
                         })
