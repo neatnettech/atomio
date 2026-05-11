@@ -4,18 +4,18 @@
 [![ci](https://github.com/neatnettech/atomio/actions/workflows/ci.yml/badge.svg)](https://github.com/neatnettech/atomio/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> **A native, GPU-accelerated debugger for React Native and Expo.**
-> Inspect variables. Track execution. Edit code. All in one window.
+> **A native, GPU-accelerated debugger + lightweight IDE shell for React Native and Expo.**
+> Open project. Hit run. Debug. All in one window.
 
-> **Status: pre-alpha.** The trunk builds and opens a window with a working code editor. Debugger connection, variable inspector, and breakpoint UI are under active development. See [the roadmap](docs/ROADMAP.md).
+> **Status: pre-alpha.** Trunk builds. Editor, design system, breakpoint UI, call stack, watches, network/react/profiler scaffolding, and minimap all in place. Project model + file tree + embedded terminal land next. See [the roadmap](docs/ROADMAP.md).
 
-**atomio** is a standalone debugger and code editor for [Expo](https://expo.dev) / React Native developers -- built from scratch in Rust on a native, GPU-accelerated stack. It connects to your running Expo app via the Chrome DevTools Protocol (CDP) and Hermes, giving you breakpoints, variable inspection, call stack navigation, network monitoring, and a full code editor in a single native macOS window.
+**atomio** is a debugger and lightweight IDE shell for [Expo](https://expo.dev) / React Native developers -- built from scratch in Rust on a native, GPU-accelerated stack. It connects to your running Expo app via the Chrome DevTools Protocol (CDP) and Hermes, and ships the surrounding workflow -- file tree, embedded terminal, live simulator stream, debugger panes, console, network, React tree, profiler -- in a single native macOS window. Extensible via a `plugin_api` trait from v0.9.
 
 macOS (Apple Silicon) first. MIT licensed. No CLA.
 
 ## The vision
 
-atomio is **dark-only**, **Zed-minimal with Atom warmth**, all-in-one. Editor, debugger, console, simulator, component tree, and profiler in a single window -- no browser tabs, no Electron, no context-switching.
+State-of-the-art, modern, lightweight, **extensible** debugger and IDE shell. **Dark-only**, **Zed-minimal with Atom warmth**. The full developer loop happens inside the window: open project -> navigate files -> run dev server in embedded terminal -> see the app live on the simulator pane -> debug + inspect against the live Hermes runtime. No browser tabs, no separate terminal app, no separate simulator window unless you want one. Plugins (Redux, Zustand, MMKV, custom CDP domains) load through a stable trait API.
 
 Live interactive mocks (open in any browser, no build step):
 - App: [`docs/design/handoff/project/atomio.html`](docs/design/handoff/project/atomio.html)
@@ -58,33 +58,41 @@ React Native debugging is fragmented. You bounce between Chrome DevTools, Flippe
 
 - **Rust + [`gpui`](https://github.com/zed-industries/zed) + Metal** -- native, GPU-rendered, 120fps on ProMotion.
 - **CDP / Hermes debugger protocol** -- connect to any running Expo / React Native app.
-- **Breakpoints** -- set, hit, continue, step over, step into, step out.
+- **Project shell** -- open a folder, file tree, fuzzy finder, recents launch screen.
+- **Embedded terminal** -- PTY-backed grid with ANSI parsing; run `npx expo start` without leaving the window.
+- **Live simulator** -- CDP `Page.startScreencast` frames in a phone-frame pane; click to forward input.
+- **Breakpoints** -- set, hit, continue, step over, step into, step out, conditional + logpoints.
 - **Variable inspector** -- scopes, watch expressions, inline values.
-- **Call stack** -- navigate frames, inspect closures.
+- **Call stack** -- navigate frames, click jumps to source.
 - **Network inspector** -- HTTP requests, WebSocket frames, timing.
 - **Console** -- log output with source mapping.
 - **React component tree** -- via React DevTools protocol integration.
-- **Code editor** -- syntax-highlighted, with undo/redo, selection, clipboard. Edit and hot-reload without leaving the debugger.
+- **Profiler** -- frame chart + flame graph + Performance metrics.
+- **Code editor** -- syntax-highlighted, with undo/redo, selection, clipboard, minimap. Edit and hot-reload without leaving the debugger.
 - **Tree-sitter** highlighting for TypeScript, TSX, JavaScript, JSON.
 - **Command palette** -- cmd+shift+p for every action.
+- **Plugin trait** -- third-party panes via `AtomioPlugin` (v0.9).
 - **Single signed `.dmg`**, auto-updating, no Electron, no browser tab.
 
 ## Status
 
-**Pre-v0.1.** The code editor works (buffer, selection, undo/redo, syntax highlighting, command palette). The debugger connection layer is the active focus. Follow along -- this is being built in public.
+**v0.2 done.** Editor + design system + breakpoint loop + inspector scaffolding all in trunk. Active focus: **v0.3 "It opens"** -- project model + file tree. Follow along -- this is being built in public.
 
 ## Roadmap (TL;DR)
 
 | Version | Theme | What ships |
 |---|---|---|
 | v0.0 | "It edits" (DONE) | gpui window, code editor, syntax highlighting, command palette |
-| v0.1 | "It connects" (DONE) | CDP client, Metro discovery, Hermes attach, console log stream, bridge wiring for breakpoints + steps |
-| v0.2 | "It looks right" | window chrome, activity bar, dock scaffold, breakpoint gutter UI, step toolbar |
-| v0.3 | "It debugs" | variable inspector (Local/Closure/Global), call stack, inline values, conditional breakpoints |
-| v0.4 | "It inspects" | network inspector, React component tree, props/state |
-| v0.5 | "Simulator + profiler" | embedded simulator view, frame chart + flame graph |
-| v0.6 | "It flows" | file tree, fuzzy finder, splits, hot reload, project picker |
-| v1.0 | "Ship it" | source maps, polish, auto-update, signed DMG |
+| v0.1 | "It connects" (DONE) | CDP client, Metro discovery, Hermes attach, console log stream, bridge wiring |
+| v0.2 | "It looks right" (DONE) | design system, breakpoint UI, step toolbar, call stack, watches, inline pills, minimap |
+| v0.3 | "It opens" (NEXT) | project model, file tree, native dir picker, watcher, recents |
+| v0.4 | "It runs" | embedded terminal (PTY + ANSI grid + scrollback + tabs) |
+| v0.5 | "It debugs" | variables polish, conditional bp + logpoints, hit counts, pretty-printers |
+| v0.6 | "It mirrors" | live simulator screencast, touch dispatch, device picker, perf chips |
+| v0.7 | "It inspects" | network + react tree + profiler polish |
+| v0.8 | "It flows" | fuzzy finder, multi-buffer tabs, splits, persistent state |
+| v0.9 | "It extends" | `plugin_api` trait, in-tree reference plugins |
+| v1.0 | "Ship it" | source maps, auto-update, signed DMG, stable API |
 
 Full roadmap: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 

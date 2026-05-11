@@ -41,6 +41,9 @@ jobs:
             console
             react_tree
             workspace
+            terminal
+            simulator
+            plugin_api
             docs
             ci
             release
