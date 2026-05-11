@@ -1756,6 +1756,7 @@ impl Render for AtomioWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Drain any debugger events that arrived since the last render.
         self.drain_bridge_events(cx);
+        self.drain_workspace_events(cx);
 
         let line_views = self.buffer_line_views();
         let gutter_width = {
