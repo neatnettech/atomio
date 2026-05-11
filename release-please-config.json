@@ -44,6 +44,11 @@
       "package-name": "react_tree",
       "skip-github-release": true,
       "changelog-path": "../../CHANGELOG.md"
+    },
+    "crates/workspace": {
+      "package-name": "workspace",
+      "skip-github-release": true,
+      "changelog-path": "../../CHANGELOG.md"
     }
   }
 }
