@@ -2,7 +2,7 @@
 //!
 //! Decodes CDP `Network` domain events into a typed [`NetworkRequest`]
 //! lifecycle. Pure model -- no I/O, no async. The bridge layer feeds raw
-//! event payloads in via [`NetworkRegistry::on_*`] handlers; the UI reads
+//! event payloads in via `NetworkRegistry::on_*` handlers; the UI reads
 //! [`NetworkRegistry::iter`] for rendering and [`NetworkRegistry::get`]
 //! for the request detail view.
 //!

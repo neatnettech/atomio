@@ -32,4 +32,10 @@ jobs:
         # `cargo test` builds the whole workspace, so no separate
         # `cargo build` step is needed.
         run: cargo test --workspace --locked
+      - name: doc
+        # Catches broken intra-doc links and missing referenced items in
+        # rustdoc comments. No untrusted input -- just runs cargo doc.
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --no-deps --locked
 

@@ -226,7 +226,7 @@ impl Scope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteValue {
     /// Display string -- `"hello"` for strings, `42` for numbers, `Array(3)`
-    /// for arrays etc. Built by [`RemoteValue::display_for`].
+    /// for arrays etc. Built by `RemoteValue::display_for`.
     pub display: String,
     /// CDP `objectId` when the value is expandable (object/array/function).
     pub object_id: Option<String>,

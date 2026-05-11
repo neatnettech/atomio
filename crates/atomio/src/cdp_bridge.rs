@@ -31,11 +31,6 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 /// Commands the UI sends to the worker thread.
-///
-/// `SetBreakpoint` / `RemoveBreakpoint` aren't dispatched from the UI yet
-/// (gutter UI ships in a follow-up PR) but the wire is in place so the
-/// follow-up is purely UI-side.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum DebuggerCommand {
     /// Scan localhost, pick the first target, connect, enable Runtime + Debugger.

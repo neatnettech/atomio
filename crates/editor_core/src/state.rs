@@ -7,7 +7,7 @@
 //!
 //! ### Undo model
 //!
-//! The history is a pair of stacks of [`Edit`] operations. Every mutation
+//! The history is a pair of stacks of `Edit` operations. Every mutation
 //! pushes an inverse record onto the undo stack and clears the redo stack.
 //! `undo` pops the top edit, applies its inverse, and pushes the original
 //! onto the redo stack; `redo` is the mirror. This is the textbook
