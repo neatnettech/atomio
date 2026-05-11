@@ -474,7 +474,21 @@ impl AtomioWindow {
         gutter_width: gpui::Pixels,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let mut pane = div()
+        // Pre-compute minimap stats before we consume `line_views` in the
+        // main render loop. Each entry: (chars_in_line, has_bp, paused).
+        // Char count drives bar width; the flags pick the tint.
+        let minimap_rows: Vec<(usize, bool, bool)> = line_views
+            .iter()
+            .map(|lv| {
+                (
+                    lv.text.chars().count(),
+                    lv.has_breakpoint,
+                    lv.is_paused_here,
+                )
+            })
+            .collect();
+
+        let mut content = div()
             .flex_1()
             .py_4()
             .flex()
@@ -586,7 +600,7 @@ impl AtomioWindow {
             } else {
                 theme::BG_1
             };
-            pane = pane.child(
+            content = content.child(
                 div()
                     .flex()
                     .flex_row()
@@ -595,7 +609,60 @@ impl AtomioWindow {
                     .child(row),
             );
         }
-        pane
+        // Minimap: 60px right-edge column per docs/design.md. Each
+        // buffer line becomes a 2px bar; width scales with char count.
+        // Breakpoint and paused-line rows get accent tints so the
+        // overview matches the editor state at a glance.
+        let minimap = self.render_minimap(&minimap_rows);
+        div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .child(content)
+            .child(minimap)
+    }
+
+    /// Right-edge minimap column. Per `docs/design.md`: 60px wide, dim
+    /// overlay. Width per row scales with line length; max bar width is
+    /// 56px to leave a 2px margin from the column edge.
+    fn render_minimap(&self, rows: &[(usize, bool, bool)]) -> gpui::Div {
+        // Longest line in the visible buffer drives the scale. Empty
+        // buffer would divide by zero — clamp to 1.
+        let max_chars = rows.iter().map(|(n, _, _)| *n).max().unwrap_or(1).max(1) as f32;
+        let mut col = div()
+            .w(px(60.0))
+            .py_4()
+            .pl(px(2.0))
+            .pr(px(2.0))
+            .flex()
+            .flex_col()
+            .bg(rgb(theme::BG_1))
+            .border_l_1()
+            .border_color(rgb(theme::LINE_1));
+        for (chars, has_bp, is_paused) in rows {
+            // 2px-tall bar; width proportional, min 1px so empty lines
+            // still register as a visible tick.
+            let frac = (*chars as f32 / max_chars).clamp(0.0, 1.0);
+            let bar_w = (frac * 56.0).max(1.0);
+            let color = if *is_paused {
+                theme::ACCENT
+            } else if *has_bp {
+                theme::ACCENT_LINE
+            } else {
+                // TX_5 = the very-dim gutter colour, matches the
+                // ~8% overlay feel without needing an alpha channel.
+                theme::TX_5
+            };
+            col = col.child(
+                div()
+                    .h(px(2.0))
+                    .w(px(bar_w))
+                    .bg(rgb(color))
+                    .rounded(px(1.0))
+                    .mb(px(1.0)),
+            );
+        }
+        col
     }
 
     /// Right dock. Renders the active pane; non-functional ones display
