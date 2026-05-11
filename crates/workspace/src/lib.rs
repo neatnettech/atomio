@@ -20,9 +20,11 @@
 mod files;
 mod manifest;
 mod recents;
+mod watcher;
 mod workspace;
 
 pub use files::{FileEntry, FileKind};
 pub use manifest::{detect_kind, Manifest, ProjectKind};
 pub use recents::{Recents, RecentsEntry};
+pub use watcher::{Tick, Watcher, DEFAULT_DEBOUNCE};
 pub use workspace::Workspace;

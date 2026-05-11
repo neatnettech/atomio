@@ -35,7 +35,7 @@ use language::{highlight, HighlightKind, Language};
 use network::{NetworkRegistry, WsDirection};
 use react_tree::{ComponentTree, NodeId};
 use tracing::debug;
-use workspace::{Recents, Workspace};
+use workspace::{Recents, Watcher as WorkspaceWatcher, Workspace};
 
 actions!(
     atomio,
@@ -218,6 +218,12 @@ struct AtomioWindow {
     /// are relative to `workspace.root()`. Empty on first open so the
     /// tree shows only top-level entries until the user clicks.
     expanded_dirs: HashSet<PathBuf>,
+    /// Filesystem watcher tied to the current workspace root. `None`
+    /// when no project is open or when watcher spawn failed (rare;
+    /// usually means the root vanished between picker + watch). The
+    /// render loop drains it each frame and triggers `Workspace::refresh`
+    /// when ticks arrive.
+    fs_watcher: Option<WorkspaceWatcher>,
     /// `(url, line)` requested by a frame click while the buffer wasn't
     /// loaded yet. Applied once the matching [`DebuggerEvent::SourceFetched`]
     /// arrives, then cleared. Only the most recent click survives.
@@ -438,9 +444,27 @@ impl AtomioWindow {
                         let name = ws.display_name();
                         let kind = ws.kind();
                         let file_count = ws.files().len();
-                        this.recents.push(ws.root().to_path_buf(), name.clone());
+                        let root = ws.root().to_path_buf();
+                        this.recents.push(root.clone(), name.clone());
                         this.workspace = Some(ws);
+                        this.expanded_dirs.clear();
                         this.dock = DockPane::Files;
+                        // Spawn a recursive notify-debouncer watcher on
+                        // the new root. If it fails (e.g. root vanished
+                        // between picker + watch) we keep the workspace
+                        // open and surface the error in the status bar;
+                        // the user can still navigate / open files.
+                        this.fs_watcher = match WorkspaceWatcher::spawn(&root) {
+                            Ok(w) => Some(w),
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "atomio",
+                                    error = %e,
+                                    "failed to spawn fs watcher"
+                                );
+                                None
+                            }
+                        };
                         this.status =
                             format!("opened {name} ({kind:?}, {file_count} files)").into();
                     }
@@ -1241,6 +1265,24 @@ impl AtomioWindow {
     }
 
     /// Drain pending events from the bridge and apply them to the window.
+    /// Drain pending filesystem ticks from the workspace watcher and
+    /// re-scan the tree when anything came through. Cheap when there
+    /// are no ticks (one channel try_recv); the rescan itself is the
+    /// existing `ignore`-walker cap'd at `DEFAULT_MAX_ENTRIES`.
+    pub(crate) fn drain_workspace_events(&mut self, cx: &mut Context<Self>) {
+        let Some(watcher) = self.fs_watcher.as_ref() else {
+            return;
+        };
+        if !watcher.drain() {
+            return;
+        }
+        if let Some(ws) = self.workspace.as_mut() {
+            let n = ws.refresh();
+            tracing::debug!(target: "atomio", file_count = n, "workspace refreshed");
+            cx.notify();
+        }
+    }
+
     fn drain_bridge_events(&mut self, cx: &mut Context<Self>) {
         // Reuse the per-window scratch buffer instead of allocating a new
         // Vec per render. `mem::take` swaps in an empty Vec (no alloc)
@@ -1722,6 +1764,7 @@ fn main() {
                             workspace: None,
                             recents: Recents::new(),
                             expanded_dirs: HashSet::new(),
+                            fs_watcher: None,
                             pending_jump: None,
                             event_buf: Vec::new(),
                         })
