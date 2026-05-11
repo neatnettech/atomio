@@ -734,11 +734,8 @@ impl AtomioWindow {
         cx.notify();
     }
     /// Jump the editor to a specific call-frame location. Resolves the
-    /// frame's `script_id` to a CDP URL via the script registry; if the
-    /// script is not already loaded as the current buffer, kicks off a
-    /// `FetchSource` request and parks the requested line on a pending
-    /// jump (handled when the source arrives). When already loaded,
-    /// moves the caret immediately.
+    /// frame's `script_id` to a CDP URL via the script registry then
+    /// delegates to [`Self::open_source_at`].
     pub(crate) fn jump_to_frame(&mut self, script_id: String, line: u32, cx: &mut Context<Self>) {
         let Some(script) = self.scripts.get(&script_id) else {
             self.status = format!("frame script {script_id} unknown to registry").into();
@@ -746,6 +743,15 @@ impl AtomioWindow {
             return;
         };
         let url = script.url.clone();
+        self.open_source_at(url, line, cx);
+    }
+
+    /// Open `url` in the editor with the caret on `line`. If the script
+    /// is already the current buffer, moves the caret immediately;
+    /// otherwise kicks off a `FetchSource` and parks a pending jump so
+    /// the caret lands when the source arrives. Shared by frame clicks
+    /// and breakpoint-sidebar clicks.
+    pub(crate) fn open_source_at(&mut self, url: String, line: u32, cx: &mut Context<Self>) {
         if self.current_url.as_deref() == Some(url.as_str()) {
             self.state.move_cursor_to(line as usize, 0);
         } else if let Some(bridge) = &self.bridge {
