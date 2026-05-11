@@ -13,7 +13,7 @@ use gpui::{
     div, linear_color_stop, linear_gradient, prelude::*, px, rgb, svg, Context, FocusHandle,
     Focusable, Render, SharedString, Window,
 };
-use language::{HighlightKind, Span};
+use language::{HighlightKind, Language, Span};
 
 use crate::cdp_bridge::{ConnectionState, DebuggerCommand};
 use crate::theme;
@@ -372,6 +372,34 @@ pub(crate) fn build_runs(
         runs.push(Run::Caret);
     }
     runs
+}
+
+/// Compact `host:port/path-tail` rendering of a CDP WebSocket URL for
+/// the status bar. Strips the scheme, keeps host:port, and tail-trims
+/// the path so the whole thing fits in ~40 chars.
+pub(crate) fn short_ws_url(ws_url: &str) -> String {
+    let stripped = ws_url
+        .strip_prefix("ws://")
+        .or_else(|| ws_url.strip_prefix("wss://"))
+        .unwrap_or(ws_url);
+    let (host, path) = stripped.split_once('/').unwrap_or((stripped, ""));
+    if path.is_empty() {
+        return host.to_string();
+    }
+    let path_tail: String = path
+        .chars()
+        .rev()
+        .take(28)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    let prefix = if path.chars().count() > 28 {
+        "…"
+    } else {
+        "/"
+    };
+    format!("{host}{prefix}{path_tail}")
 }
 
 pub(crate) fn placeholder(label: impl Into<SharedString>) -> gpui::Div {
@@ -1565,12 +1593,33 @@ impl Render for AtomioWindow {
         let cursor = self.cursor_label();
         let status = self.status.clone();
         let title = self.title();
+        // Right-side status cluster: language label + dirty flag +
+        // cursor position. Language derives from the buffer's path
+        // extension; falls back to "plain" when unknown.
+        let language_label: SharedString = self
+            .state
+            .buffer
+            .path()
+            .and_then(Language::from_path)
+            .map(|l| l.label().into())
+            .unwrap_or_else(|| "plain".into());
+        let dirty_marker: Option<&'static str> = self.state.buffer.is_dirty().then_some("●");
+        // Status bar connection label: dot + state + (when connected)
+        // a short host:port form of the ws_url so the user can confirm
+        // which Metro target the bridge picked.
         let connection_label: SharedString = match &self.connection {
             ConnectionState::Disconnected => "● disconnected".into(),
             ConnectionState::Scanning => "● scanning".into(),
-            ConnectionState::Connecting { .. } => "● connecting".into(),
-            ConnectionState::Connected { .. } => "● connected".into(),
-            ConnectionState::Failed { .. } => "● failed".into(),
+            ConnectionState::Connecting { ws_url } => {
+                format!("● connecting · {}", short_ws_url(ws_url)).into()
+            }
+            ConnectionState::Connected { ws_url } => {
+                format!("● connected · {}", short_ws_url(ws_url)).into()
+            }
+            ConnectionState::Failed { reason } => {
+                let s: String = reason.chars().take(40).collect();
+                format!("● failed · {s}").into()
+            }
         };
         let connection_color: u32 = match &self.connection {
             ConnectionState::Connected { .. } => theme::ACCENT,
@@ -1762,7 +1811,17 @@ impl Render for AtomioWindow {
                             )
                             .child(div().child(status)),
                     )
-                    .child(div().child(cursor)),
+                    .child(
+                        div()
+                            .flex()
+                            .gap_3()
+                            .items_center()
+                            .child(div().text_color(rgb(theme::TX_4)).child(language_label))
+                            .children(
+                                dirty_marker.map(|m| div().text_color(rgb(theme::WARN)).child(m)),
+                            )
+                            .child(div().child(cursor)),
+                    ),
             )
             .children(palette_overlay)
     }
@@ -1771,6 +1830,31 @@ impl Render for AtomioWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_ws_url_strips_scheme_and_keeps_short_path() {
+        let s = short_ws_url("ws://localhost:8081/inspector/debug");
+        assert_eq!(s, "localhost:8081/inspector/debug");
+    }
+
+    #[test]
+    fn short_ws_url_tail_trims_long_path() {
+        let s =
+            short_ws_url("ws://localhost:8081/inspector/debug/very/very/very/long/extra/path/here");
+        assert!(s.starts_with("localhost:8081…"));
+        assert!(s.ends_with("path/here"));
+    }
+
+    #[test]
+    fn short_ws_url_handles_no_path() {
+        assert_eq!(short_ws_url("ws://localhost:8081"), "localhost:8081");
+    }
+
+    #[test]
+    fn short_ws_url_handles_wss() {
+        let s = short_ws_url("wss://example.com:443/x");
+        assert_eq!(s, "example.com:443/x");
+    }
 
     #[test]
     fn extract_idents_basic() {

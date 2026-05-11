@@ -69,6 +69,17 @@ impl Language {
         })
     }
 
+    /// Short human-readable label suitable for status bar / pickers.
+    pub fn label(self) -> &'static str {
+        match self {
+            Language::Rust => "Rust",
+            Language::TypeScript => "TS",
+            Language::Tsx => "TSX",
+            Language::JavaScript => "JS",
+            Language::Json => "JSON",
+        }
+    }
+
     fn ts_language(self) -> tree_sitter::Language {
         match self {
             Language::Rust => tree_sitter_rust::LANGUAGE.into(),
