@@ -20,11 +20,13 @@
 mod files;
 mod manifest;
 mod recents;
+mod state;
 mod watcher;
 mod workspace;
 
 pub use files::{FileEntry, FileKind};
 pub use manifest::{detect_kind, Manifest, ProjectKind};
 pub use recents::{Recents, RecentsEntry};
+pub use state::AppState;
 pub use watcher::{Tick, Watcher, DEFAULT_DEBOUNCE};
 pub use workspace::Workspace;

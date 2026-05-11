@@ -35,7 +35,7 @@ use language::{highlight, HighlightKind, Language};
 use network::{NetworkRegistry, WsDirection};
 use react_tree::{ComponentTree, NodeId};
 use tracing::debug;
-use workspace::{Recents, Watcher as WorkspaceWatcher, Workspace};
+use workspace::{AppState, Recents, Watcher as WorkspaceWatcher, Workspace};
 
 actions!(
     atomio,
@@ -449,6 +449,7 @@ impl AtomioWindow {
                         this.workspace = Some(ws);
                         this.expanded_dirs.clear();
                         this.dock = DockPane::Files;
+                        this.reseed_recents_in_palette();
                         // Spawn a recursive notify-debouncer watcher on
                         // the new root. If it fails (e.g. root vanished
                         // between picker + watch) we keep the workspace
@@ -467,6 +468,7 @@ impl AtomioWindow {
                         };
                         this.status =
                             format!("opened {name} ({kind:?}, {file_count} files)").into();
+                        this.persist_state();
                     }
                     Err(e) => {
                         this.status = format!("open project failed: {e}").into();
@@ -476,6 +478,74 @@ impl AtomioWindow {
             });
         })
         .detach();
+    }
+
+    /// Snapshot current persistable state to disk. Called after every
+    /// project open / recents mutation. Best-effort: write failures
+    /// log via tracing and surface in the status bar but never panic
+    /// or abort the action that triggered the save.
+    pub(crate) fn persist_state(&self) {
+        let path = state_file_path();
+        let last_project = self.workspace.as_ref().map(|w| w.root().to_path_buf());
+        let state = AppState {
+            version: AppState::VERSION,
+            recents: self.recents.clone(),
+            last_project,
+        };
+        if let Err(e) = state.save(&path) {
+            tracing::warn!(target: "atomio", error = %e, path = %path.display(), "state save failed");
+        }
+    }
+
+    /// Reopen recent entry at `idx` (newest is 0). Bumps it to the
+    /// front of the recents + persists.
+    pub(crate) fn open_recent(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(entry) = self.recents.entries().get(idx).cloned() else {
+            self.status = format!("recent #{idx} not found").into();
+            cx.notify();
+            return;
+        };
+        let root = entry.path.clone();
+        match Workspace::open(&root) {
+            Ok(ws) => {
+                let name = ws.display_name();
+                let kind = ws.kind();
+                let file_count = ws.files().len();
+                self.recents.push(root.clone(), name.clone());
+                self.workspace = Some(ws);
+                self.expanded_dirs.clear();
+                self.dock = DockPane::Files;
+                self.fs_watcher = match WorkspaceWatcher::spawn(&root) {
+                    Ok(w) => Some(w),
+                    Err(e) => {
+                        tracing::warn!(target: "atomio", error = %e, "fs watcher spawn failed");
+                        None
+                    }
+                };
+                self.status = format!("opened {name} ({kind:?}, {file_count} files)").into();
+                self.reseed_recents_in_palette();
+                self.persist_state();
+            }
+            Err(e) => {
+                self.status = format!("open failed: {e} — pruning from recents").into();
+                self.recents.forget(&root);
+                self.reseed_recents_in_palette();
+                self.persist_state();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Rebuild the `File: Recent #N -- NAME` palette entries from
+    /// the current recents list. Drops every previous `open_recent:`
+    /// entry first so the palette never accumulates stale rows.
+    pub(crate) fn reseed_recents_in_palette(&mut self) {
+        self.commands.unregister_prefix("open_recent:");
+        for (i, entry) in self.recents.entries().iter().enumerate() {
+            let label = format!("File: Recent #{i} -- {}", entry.name);
+            let id = format!("open_recent:{i}");
+            self.commands.register(label, id);
+        }
     }
 
     /// Toggle expand/collapse state for a tree directory. Path is
@@ -849,6 +919,14 @@ impl AtomioWindow {
             "components_clear" => self.on_components_clear(&ComponentsClear, window, cx),
             "profiler_refresh" => self.on_profiler_refresh(&ProfilerRefresh, window, cx),
             "simulator_capture" => self.on_simulator_capture(&SimulatorCapture, window, cx),
+            other if other.starts_with("open_recent:") => {
+                let idx: Option<usize> = other
+                    .strip_prefix("open_recent:")
+                    .and_then(|s| s.parse().ok());
+                if let Some(i) = idx {
+                    self.open_recent(i, cx);
+                }
+            }
             _ => {}
         }
     }
@@ -1608,6 +1686,15 @@ fn log_file_path() -> PathBuf {
     base.join("atomio.log")
 }
 
+/// Path to the persisted app state JSON. Mirrors macOS convention
+/// `~/Library/Application Support/atomio/state.json`. Parent dirs are
+/// created lazily on first save by [`workspace::AppState::save`].
+fn state_file_path() -> PathBuf {
+    dirs::data_dir()
+        .map(|d| d.join("atomio").join("state.json"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/atomio/state.json"))
+}
+
 /// Initialise tracing subscribers. Logs go to stderr (visible when atomio
 /// is launched from a terminal) and to a rotating file at
 /// `~/Library/Logs/atomio/atomio.log`. Filter via `RUST_LOG`; defaults to
@@ -1659,6 +1746,10 @@ fn main() {
     let _log_guard = init_logging();
 
     let buffer = load_initial_buffer();
+    // Hydrate persisted state once before the gpui runtime takes over.
+    // Cheap: small JSON file, no I/O on the hot path. Missing /
+    // malformed files yield default state silently.
+    let initial_state = AppState::load(&state_file_path());
 
     Application::new()
         .with_assets(assets::EmbeddedAssets)
@@ -1727,8 +1818,18 @@ fn main() {
                     },
                     |_window, cx| {
                         let state = EditorState::new(buffer.clone());
-                        let commands = build_command_registry();
+                        let mut commands = build_command_registry();
                         let bridge = cdp_bridge::spawn();
+                        let recents = initial_state.recents.clone();
+                        // Seed "File: Recent #N" entries from persisted
+                        // recents before the window opens so the palette
+                        // shows them on first paint.
+                        for (i, entry) in recents.entries().iter().enumerate() {
+                            commands.register(
+                                format!("File: Recent #{i} -- {}", entry.name),
+                                format!("open_recent:{i}"),
+                            );
+                        }
                         cx.new(|cx| AtomioWindow {
                             state,
                             commands,
@@ -1762,7 +1863,7 @@ fn main() {
                             dock: DockPane::Console,
                             current_url: None,
                             workspace: None,
-                            recents: Recents::new(),
+                            recents,
                             expanded_dirs: HashSet::new(),
                             fs_watcher: None,
                             pending_jump: None,
