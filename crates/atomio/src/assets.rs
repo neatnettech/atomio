@@ -43,6 +43,10 @@ const ICONS: &[(&str, &[u8])] = &[
         "icons/console.svg",
         include_bytes!("../assets/icons/console.svg"),
     ),
+    (
+        "icons/terminal.svg",
+        include_bytes!("../assets/icons/terminal.svg"),
+    ),
 ];
 
 /// Asset source backed by [`ICONS`]. Cheap to clone (the table is
@@ -116,6 +120,7 @@ mod tests {
             "components",
             "profiler",
             "console",
+            "terminal",
         ] {
             let path = format!("icons/{name}.svg");
             assert!(
