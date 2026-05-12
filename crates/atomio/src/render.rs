@@ -1615,17 +1615,90 @@ impl AtomioWindow {
     /// once we hit an unexpanded directory we skip every subsequent
     /// row at strictly greater depth until the depth drops back. That
     /// keeps the render O(visible rows) instead of O(all entries).
+    /// Launch screen shown in the Files pane when no project is open.
+    /// Layout: title, hint, "Open Project…" button, recents list with
+    /// clickable rows. Empty recents collapses gracefully to just the
+    /// button + hint.
+    fn render_launch_screen(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let mut wrap = div().flex_1().flex().flex_col().px_3().py_4().gap_2();
+        wrap = wrap.child(
+            div()
+                .text_sm()
+                .text_color(rgb(theme::TX_1))
+                .child("No project open"),
+        );
+        wrap = wrap.child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme::TX_4))
+                .child("Pick a directory to start. cmd+shift+o opens the native picker."),
+        );
+        // Big "Open Project" button. Rendered as a clickable styled row
+        // so we don't pull in a button widget yet; matches the simulator
+        // pane's capture button styling.
+        wrap = wrap.child(
+            div()
+                .id(SharedString::from("launch-open-project"))
+                .px_3()
+                .py_1()
+                .rounded(px(4.0))
+                .bg(rgb(theme::ACCENT_SOFT))
+                .border_1()
+                .border_color(rgb(theme::ACCENT_LINE))
+                .text_color(rgb(theme::ACCENT))
+                .text_xs()
+                .hover(|s| s.bg(rgb(theme::BG_3)))
+                .child("Open Project…")
+                .on_click(cx.listener(|this, _ev, win, cx| {
+                    this.on_open_project(&crate::OpenProject, win, cx);
+                })),
+        );
+        if self.recents.is_empty() {
+            return wrap;
+        }
+        wrap = wrap.child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme::TX_3))
+                .pt_2()
+                .child(format!("Recent ({})", self.recents.len())),
+        );
+        for (i, entry) in self.recents.entries().iter().enumerate() {
+            let display_path = entry.path.display().to_string();
+            wrap = wrap.child(
+                div()
+                    .id(SharedString::from(format!("launch-recent-{i}")))
+                    .flex()
+                    .flex_col()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(3.0))
+                    .hover(|s| s.bg(rgb(theme::BG_3)))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme::TX_2))
+                            .child(entry.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme::TX_4))
+                            .child(display_path),
+                    )
+                    .on_click(cx.listener(move |this, _ev, _win, cx| {
+                        this.open_recent(i, cx);
+                    })),
+            );
+        }
+        wrap
+    }
+
     fn render_files_body(&self, cx: &mut Context<Self>) -> gpui::Div {
         use workspace::FileKind;
 
         let Some(ws) = self.workspace.as_ref() else {
-            return div()
-                .flex_1()
-                .px_3()
-                .py_4()
-                .text_xs()
-                .text_color(rgb(theme::TX_4))
-                .child("(no project — cmd+shift+o or palette: File: Open Project)");
+            return self.render_launch_screen(cx);
         };
 
         let header = div()

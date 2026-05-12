@@ -1750,6 +1750,15 @@ fn main() {
     // Cheap: small JSON file, no I/O on the hot path. Missing /
     // malformed files yield default state silently.
     let initial_state = AppState::load(&state_file_path());
+    // Auto-reopen the most recent project, but only if the user didn't
+    // pass an explicit file path on the CLI — that's a stronger signal
+    // they want single-file mode for this launch.
+    let cli_path_provided = std::env::args().nth(1).is_some();
+    let initial_ws_root: Option<PathBuf> = if cli_path_provided {
+        None
+    } else {
+        initial_state.last_project.clone()
+    };
 
     Application::new()
         .with_assets(assets::EmbeddedAssets)
@@ -1830,11 +1839,33 @@ fn main() {
                                 format!("open_recent:{i}"),
                             );
                         }
+                        // Try to re-open the last project. Silently skip
+                        // when the path vanished or fails to open — the
+                        // launch-screen recents list still offers it.
+                        let workspace: Option<Workspace> = initial_ws_root
+                            .as_ref()
+                            .and_then(|p| Workspace::open(p).ok());
+                        let fs_watcher = workspace
+                            .as_ref()
+                            .and_then(|w| WorkspaceWatcher::spawn(w.root()).ok());
+                        let initial_dock = if workspace.is_some() {
+                            DockPane::Files
+                        } else {
+                            DockPane::Console
+                        };
+                        let initial_status: SharedString = match workspace.as_ref() {
+                            Some(w) => {
+                                format!("reopened {} ({} files)", w.display_name(), w.files().len())
+                                    .into()
+                            }
+                            None => {
+                                "cmd+shift+p palette · cmd+shift+d connect · cmd+1..6 panes".into()
+                            }
+                        };
                         cx.new(|cx| AtomioWindow {
                             state,
                             commands,
-                            status: "cmd+shift+p palette · cmd+shift+d connect · cmd+1..6 panes"
-                                .into(),
+                            status: initial_status,
                             focus_handle: cx.focus_handle(),
                             palette_query: None,
                             palette_selected: 0,
@@ -1860,12 +1891,12 @@ fn main() {
                             metrics: Vec::new(),
                             screenshot_path: None,
                             screenshot_count: 0,
-                            dock: DockPane::Console,
+                            dock: initial_dock,
                             current_url: None,
-                            workspace: None,
+                            workspace,
                             recents,
                             expanded_dirs: HashSet::new(),
-                            fs_watcher: None,
+                            fs_watcher,
                             pending_jump: None,
                             event_buf: Vec::new(),
                         })
