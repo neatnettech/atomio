@@ -1941,7 +1941,18 @@ fn main() {
     // Hydrate persisted state once before the gpui runtime takes over.
     // Cheap: small JSON file, no I/O on the hot path. Missing /
     // malformed files yield default state silently.
-    let initial_state = AppState::load(&state_file_path());
+    let mut initial_state = AppState::load(&state_file_path());
+    // Drop recents entries whose dirs vanished between sessions so the
+    // launch screen never offers a project the user can't open. Persist
+    // immediately so a crash before the user does anything still leaves
+    // the on-disk state clean.
+    let pruned = initial_state.recents.prune_missing();
+    if pruned > 0 {
+        tracing::info!(target: "atomio", count = pruned, "pruned stale recents");
+        if let Err(e) = initial_state.save(&state_file_path()) {
+            tracing::warn!(target: "atomio", error = %e, "failed to persist pruned recents");
+        }
+    }
     // Auto-reopen the most recent project, but only if the user didn't
     // pass an explicit file path on the CLI — that's a stronger signal
     // they want single-file mode for this launch.
