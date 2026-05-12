@@ -49,6 +49,11 @@
       "package-name": "workspace",
       "skip-github-release": true,
       "changelog-path": "../../CHANGELOG.md"
+    },
+    "crates/terminal": {
+      "package-name": "terminal",
+      "skip-github-release": true,
+      "changelog-path": "../../CHANGELOG.md"
     }
   }
 }
