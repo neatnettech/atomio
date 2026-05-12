@@ -481,6 +481,7 @@ impl AtomioWindow {
                     Ok(ws) => {
                         let name = ws.display_name();
                         let kind = ws.kind();
+                        let is_monorepo = ws.manifest().is_monorepo;
                         let file_count = ws.files().len();
                         let root = ws.root().to_path_buf();
                         this.recents.push(root.clone(), name.clone());
@@ -504,8 +505,10 @@ impl AtomioWindow {
                                 None
                             }
                         };
+                        let monorepo = if is_monorepo { " monorepo" } else { "" };
                         this.status =
-                            format!("opened {name} ({kind:?}, {file_count} files)").into();
+                            format!("opened {name} ({kind:?}{monorepo}, {file_count} files)")
+                                .into();
                         this.persist_state();
                     }
                     Err(e) => {
@@ -548,6 +551,7 @@ impl AtomioWindow {
             Ok(ws) => {
                 let name = ws.display_name();
                 let kind = ws.kind();
+                let is_monorepo = ws.manifest().is_monorepo;
                 let file_count = ws.files().len();
                 self.recents.push(root.clone(), name.clone());
                 self.workspace = Some(ws);
@@ -560,7 +564,9 @@ impl AtomioWindow {
                         None
                     }
                 };
-                self.status = format!("opened {name} ({kind:?}, {file_count} files)").into();
+                let monorepo = if is_monorepo { " monorepo" } else { "" };
+                self.status =
+                    format!("opened {name} ({kind:?}{monorepo}, {file_count} files)").into();
                 self.reseed_recents_in_palette();
                 self.persist_state();
             }
