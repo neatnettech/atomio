@@ -10,6 +10,8 @@
 //! thread. The cap defaults to 50_000 -- enough for most RN apps while
 //! staying snappy.
 
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
@@ -45,14 +47,16 @@ pub const DEFAULT_MAX_ENTRIES: usize = 50_000;
 /// Recursively list files under `root`, honouring `.gitignore` +
 /// `.ignore` rules and skipping hidden files by default.
 ///
-/// Entries are sorted by parent-first depth-first order so the tree
-/// renderer can stream them straight into rows.
+/// Entries are emitted in **DFS pre-order with directory-first,
+/// case-insensitive alphabetical sibling sort**: at each level
+/// directories come before files, and within each kind names are
+/// ordered alphabetically. This matches the conventional file-tree
+/// layout users expect from Finder / VS Code.
 ///
 /// `max_entries` caps the result length; the walk stops early without
 /// erroring once the cap is hit. Use [`DEFAULT_MAX_ENTRIES`] for the
 /// common case.
 pub fn scan(root: &Path, max_entries: usize) -> Vec<FileEntry> {
-    let mut out = Vec::new();
     let walker = WalkBuilder::new(root)
         .hidden(true)
         .git_ignore(true)
@@ -62,8 +66,9 @@ pub fn scan(root: &Path, max_entries: usize) -> Vec<FileEntry> {
         .follow_links(false)
         .build();
 
+    let mut raw: Vec<FileEntry> = Vec::new();
     for result in walker {
-        if out.len() >= max_entries {
+        if raw.len() >= max_entries {
             break;
         }
         let Ok(entry) = result else { continue };
@@ -84,13 +89,70 @@ pub fn scan(root: &Path, max_entries: usize) -> Vec<FileEntry> {
             None => continue,
         };
         let depth = rel.components().count();
-        out.push(FileEntry {
+        raw.push(FileEntry {
             path: rel.to_path_buf(),
             kind,
             depth,
         });
     }
+    sort_dfs_dirs_first(raw)
+}
+
+/// Re-emit `entries` in DFS pre-order with dirs-first, alpha sibling
+/// sort. Walks the parent->children map built from the input list so
+/// the result preserves the same set of entries but in tree-UI order.
+fn sort_dfs_dirs_first(entries: Vec<FileEntry>) -> Vec<FileEntry> {
+    // Group entries by parent (root = empty PathBuf).
+    let mut children: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+    for (i, e) in entries.iter().enumerate() {
+        let parent = e.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        children.entry(parent).or_default().push(i);
+    }
+    // Sort each parent's children: directories before files/symlinks,
+    // then case-insensitive alpha by file_name.
+    for kids in children.values_mut() {
+        kids.sort_by(|&a, &b| {
+            let ea = &entries[a];
+            let eb = &entries[b];
+            let ord = type_rank(ea.kind).cmp(&type_rank(eb.kind));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            file_name_lower(&ea.path).cmp(&file_name_lower(&eb.path))
+        });
+    }
+    // DFS from the root.
+    let mut out = Vec::with_capacity(entries.len());
+    let mut stack: Vec<usize> = children
+        .get(Path::new(""))
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .rev()
+        .collect();
+    while let Some(idx) = stack.pop() {
+        out.push(entries[idx].clone());
+        if let Some(kids) = children.get(&entries[idx].path) {
+            for &child in kids.iter().rev() {
+                stack.push(child);
+            }
+        }
+    }
     out
+}
+
+fn type_rank(kind: FileKind) -> u8 {
+    match kind {
+        FileKind::Directory => 0,
+        FileKind::Symlink => 1,
+        FileKind::File => 2,
+    }
+}
+
+fn file_name_lower(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -151,6 +213,39 @@ mod tests {
         }
         let entries = scan(tmp.path(), 5);
         assert_eq!(entries.len(), 5);
+    }
+
+    #[test]
+    fn scan_orders_dirs_before_files_alphabetically() {
+        let tmp = TempDir::new().unwrap();
+        // Mixed siblings at the root and inside a subdir. The
+        // filesystem creation order is intentionally not alphabetical
+        // and interleaves dirs + files so we exercise the sort.
+        touch(tmp.path(), "Zfile.txt");
+        touch(tmp.path(), "afile.txt");
+        touch(tmp.path(), "Mid/inner.txt");
+        touch(tmp.path(), "Mid/aaa.txt");
+        touch(tmp.path(), "Adir/leaf.txt");
+        let entries = scan(tmp.path(), DEFAULT_MAX_ENTRIES);
+        let paths: Vec<String> = entries
+            .iter()
+            .map(|e| e.path.to_string_lossy().to_string())
+            .collect();
+        // Root level: Adir, Mid (dirs alpha), then afile.txt, Zfile.txt
+        // (files alpha case-insensitive). Each dir's children follow
+        // immediately in DFS pre-order.
+        assert_eq!(
+            paths,
+            vec![
+                "Adir",
+                "Adir/leaf.txt",
+                "Mid",
+                "Mid/aaa.txt",
+                "Mid/inner.txt",
+                "afile.txt",
+                "Zfile.txt",
+            ]
+        );
     }
 
     #[test]
