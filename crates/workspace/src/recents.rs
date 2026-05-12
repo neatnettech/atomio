@@ -81,6 +81,24 @@ impl Recents {
         self.entries.retain(|e| e.path != path);
     }
 
+    /// Drop every entry whose `path` is no longer an existing
+    /// directory on disk. Returns the number of entries removed so
+    /// callers can decide whether to persist + log.
+    ///
+    /// Permission / I/O errors that aren't `NotFound` are treated
+    /// conservatively as "still present" -- a transient EACCES on a
+    /// remote mount shouldn't wipe a user's recents. Only outright
+    /// missing paths or paths that have been replaced by non-dirs
+    /// (a file at the same name) are dropped.
+    pub fn prune_missing(&mut self) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|e| match std::fs::metadata(&e.path) {
+            Ok(meta) => meta.is_dir(),
+            Err(err) => err.kind() != std::io::ErrorKind::NotFound,
+        });
+        before - self.entries.len()
+    }
+
     /// Number of entries currently tracked.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -162,5 +180,43 @@ mod tests {
         r.push("/a", "a");
         r.clear();
         assert!(r.is_empty());
+    }
+
+    #[test]
+    fn prune_missing_drops_nonexistent_paths_keeps_real_dirs() {
+        use tempfile::TempDir;
+        let real = TempDir::new().unwrap();
+        let mut r = Recents::new();
+        r.push("/does/not/exist/atomio-tests", "ghost");
+        r.push(real.path(), "alive");
+        let dropped = r.prune_missing();
+        assert_eq!(dropped, 1);
+        assert_eq!(r.entries().len(), 1);
+        assert_eq!(r.entries()[0].name, "alive");
+    }
+
+    #[test]
+    fn prune_missing_drops_paths_that_are_now_files_not_dirs() {
+        // A path that used to be a project dir but has since been
+        // replaced by a regular file is just as stale as one that's
+        // disappeared entirely.
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("was-a-project");
+        std::fs::write(&file, "").unwrap();
+        let mut r = Recents::new();
+        r.push(&file, "ex-project");
+        assert_eq!(r.prune_missing(), 1);
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn prune_missing_returns_zero_when_nothing_to_drop() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let mut r = Recents::new();
+        r.push(tmp.path(), "alive");
+        assert_eq!(r.prune_missing(), 0);
+        assert_eq!(r.entries().len(), 1);
     }
 }
