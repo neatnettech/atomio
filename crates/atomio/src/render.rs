@@ -416,6 +416,7 @@ impl AtomioWindow {
             DockPane::Components,
             DockPane::Profiler,
             DockPane::Console,
+            DockPane::Terminal,
         ];
         let mut bar = div()
             .w(px(48.0))
@@ -704,6 +705,7 @@ impl AtomioWindow {
             DockPane::Components => self.render_components_body(cx),
             DockPane::Profiler => self.render_profiler_body(cx),
             DockPane::Network => self.render_network_body(cx),
+            DockPane::Terminal => self.render_terminal_body(cx),
         };
 
         div()
@@ -1776,6 +1778,135 @@ impl AtomioWindow {
         div().flex().flex_col().child(header).child(list)
     }
 
+    /// Terminal pane body. Renders the current grid snapshot as one
+    /// row of styled spans per terminal line, plus a header strip
+    /// with the spawn command + scrollback count + buttons for
+    /// New / expo start / Kill. Empty state when no terminal is live.
+    fn render_terminal_body(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(term) = self.terminal.as_ref() else {
+            return div()
+                .flex()
+                .flex_col()
+                .px_3()
+                .py_4()
+                .gap_2()
+                .text_xs()
+                .child(
+                    div()
+                        .text_color(rgb(theme::TX_1))
+                        .child("No terminal running"),
+                )
+                .child(
+                    div()
+                        .text_color(rgb(theme::TX_4))
+                        .child("cmd+shift+j spawns a new shell. Palette: Terminal: ..."),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from("term-new"))
+                        .px_3()
+                        .py_1()
+                        .rounded(px(4.0))
+                        .bg(rgb(theme::ACCENT_SOFT))
+                        .border_1()
+                        .border_color(rgb(theme::ACCENT_LINE))
+                        .text_color(rgb(theme::ACCENT))
+                        .hover(|s| s.bg(rgb(theme::BG_3)))
+                        .child("New Terminal")
+                        .on_click(cx.listener(|this, _ev, win, cx| {
+                            this.on_terminal_new(&crate::TerminalNew, win, cx);
+                        })),
+                );
+        };
+        let snap = term.snapshot();
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .py_1()
+            .text_xs()
+            .text_color(rgb(theme::TX_3))
+            .child(div().child(format!(
+                "{}x{} · scrollback {}",
+                snap.cols, snap.rows, snap.scrollback_len
+            )))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(
+                        self.term_button("expo start", "term-expo", cx, |this, win, cx| {
+                            this.on_terminal_expo_start(&crate::TerminalExpoStart, win, cx);
+                        }),
+                    )
+                    .child(self.term_button("New", "term-new", cx, |this, win, cx| {
+                        this.on_terminal_new(&crate::TerminalNew, win, cx);
+                    }))
+                    .child(self.term_button("Kill", "term-kill", cx, |this, win, cx| {
+                        this.on_terminal_kill(&crate::TerminalKill, win, cx);
+                    })),
+            );
+
+        // Body: one div per row; cells with a matching bg get a
+        // grouped span. For v0.4 PR2 we render each cell as its own
+        // span — simple and correct; per-run grouping is a future
+        // optimisation if frame time regresses.
+        let cols = snap.cols as usize;
+        let mut grid = div().flex().flex_col().px_2().py_1().bg(rgb(theme::BG_0));
+        for r in 0..(snap.rows as usize) {
+            let start = r * cols;
+            let row_cells = &snap.cells[start..start + cols];
+            let mut row = div().flex().flex_row().text_xs();
+            // Collapse contiguous runs of same fg/bg/bold for fewer
+            // child divs.
+            let mut i = 0;
+            while i < cols {
+                let cell = row_cells[i];
+                let mut j = i + 1;
+                while j < cols {
+                    let next = row_cells[j];
+                    if next.fg != cell.fg || next.bg != cell.bg || next.bold != cell.bold {
+                        break;
+                    }
+                    j += 1;
+                }
+                let text: String = row_cells[i..j].iter().map(|c| c.ch).collect();
+                row = row.child(div().bg(rgb(cell.bg)).text_color(rgb(cell.fg)).child(text));
+                i = j;
+            }
+            grid = grid.child(row);
+        }
+
+        div().flex().flex_col().child(header).child(grid)
+    }
+
+    /// Small inline button used in the terminal pane header. Pulled
+    /// out so the three buttons (expo / New / Kill) stay readable.
+    fn term_button(
+        &self,
+        label: &'static str,
+        id: &'static str,
+        cx: &mut Context<Self>,
+        cb: impl Fn(&mut AtomioWindow, &mut Window, &mut Context<AtomioWindow>) + 'static,
+    ) -> gpui::Div {
+        div().child(
+            div()
+                .id(SharedString::from(id))
+                .px_2()
+                .py(px(2.0))
+                .rounded(px(3.0))
+                .bg(rgb(theme::BG_3))
+                .text_color(rgb(theme::TX_2))
+                .text_xs()
+                .hover(|s| s.bg(rgb(theme::BG_4)))
+                .child(label)
+                .on_click(cx.listener(move |this, _ev, win, cx| cb(this, win, cx))),
+        )
+    }
+
     fn render_console_body(&self) -> gpui::Div {
         let entries: Vec<_> = self
             .console
@@ -1830,6 +1961,7 @@ impl Render for AtomioWindow {
         // Drain any debugger events that arrived since the last render.
         self.drain_bridge_events(cx);
         self.drain_workspace_events(cx);
+        self.drain_terminal(cx);
 
         let line_views = self.buffer_line_views();
         let gutter_width = {
@@ -1991,6 +2123,10 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_components_clear))
             .on_action(cx.listener(Self::on_profiler_refresh))
             .on_action(cx.listener(Self::on_simulator_capture))
+            .on_action(cx.listener(Self::on_show_terminal))
+            .on_action(cx.listener(Self::on_terminal_new))
+            .on_action(cx.listener(Self::on_terminal_kill))
+            .on_action(cx.listener(Self::on_terminal_expo_start))
             .on_key_down(cx.listener(Self::on_key_down))
             .flex()
             .flex_col()

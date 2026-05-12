@@ -437,6 +437,7 @@ dependencies = [
  "react_tree",
  "rfd",
  "serde_json",
+ "terminal",
  "tokio",
  "tracing",
  "tracing-appender",

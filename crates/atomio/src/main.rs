@@ -90,6 +90,10 @@ actions!(
         ComponentsClear,
         ProfilerRefresh,
         SimulatorCapture,
+        ShowTerminal,
+        TerminalNew,
+        TerminalKill,
+        TerminalExpoStart,
     ]
 );
 
@@ -113,6 +117,7 @@ enum DockPane {
     Profiler,
     Console,
     Network,
+    Terminal,
 }
 
 impl DockPane {
@@ -125,6 +130,7 @@ impl DockPane {
             DockPane::Profiler => "Profiler",
             DockPane::Console => "Console",
             DockPane::Network => "Network",
+            DockPane::Terminal => "Terminal",
         }
     }
 
@@ -139,6 +145,7 @@ impl DockPane {
             DockPane::Profiler => "icons/profiler.svg",
             DockPane::Console => "icons/console.svg",
             DockPane::Network => "icons/network.svg",
+            DockPane::Terminal => "icons/terminal.svg",
         }
     }
 }
@@ -224,6 +231,10 @@ struct AtomioWindow {
     /// render loop drains it each frame and triggers `Workspace::refresh`
     /// when ticks arrive.
     fs_watcher: Option<WorkspaceWatcher>,
+    /// Embedded terminal session. `None` until `TerminalNew` spawns one.
+    /// v0.4 caps at one terminal per window; tabs land in v0.4 follow-up.
+    /// Dropping `Some(_)` closes the PTY and lets the reader thread exit.
+    terminal: Option<terminal::Terminal>,
     /// `(url, line)` requested by a frame click while the buffer wasn't
     /// loaded yet. Applied once the matching [`DebuggerEvent::SourceFetched`]
     /// arrives, then cleared. Only the most recent click survives.
@@ -266,6 +277,10 @@ fn build_command_registry() -> CommandRegistry {
     reg.register("View: Profiler Pane", "show_profiler");
     reg.register("View: Console Pane", "show_console");
     reg.register("View: Network Pane", "show_network");
+    reg.register("View: Terminal Pane", "show_terminal");
+    reg.register("Terminal: New", "terminal_new");
+    reg.register("Terminal: Kill", "terminal_kill");
+    reg.register("Terminal: expo start", "terminal_expo_start");
     reg.register("Network: Clear", "clear_network");
     reg.register("Components: Load Demo Tree", "components_load_demo");
     reg.register("Components: Clear", "components_clear");
@@ -919,6 +934,10 @@ impl AtomioWindow {
             "components_clear" => self.on_components_clear(&ComponentsClear, window, cx),
             "profiler_refresh" => self.on_profiler_refresh(&ProfilerRefresh, window, cx),
             "simulator_capture" => self.on_simulator_capture(&SimulatorCapture, window, cx),
+            "show_terminal" => self.on_show_terminal(&ShowTerminal, window, cx),
+            "terminal_new" => self.on_terminal_new(&TerminalNew, window, cx),
+            "terminal_kill" => self.on_terminal_kill(&TerminalKill, window, cx),
+            "terminal_expo_start" => self.on_terminal_expo_start(&TerminalExpoStart, window, cx),
             other if other.starts_with("open_recent:") => {
                 let idx: Option<usize> = other
                     .strip_prefix("open_recent:")
@@ -1092,6 +1111,137 @@ impl AtomioWindow {
     }
     fn on_show_network(&mut self, _: &ShowNetwork, _: &mut Window, cx: &mut Context<Self>) {
         self.show_dock(DockPane::Network, cx);
+    }
+    fn on_show_terminal(&mut self, _: &ShowTerminal, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_dock(DockPane::Terminal, cx);
+    }
+
+    /// Default cwd for new terminals: current workspace root, else
+    /// $HOME, else `/`. Avoids dropping the user in `/` when launching
+    /// atomio from Finder (which inherits `/` as cwd).
+    fn terminal_cwd(&self) -> PathBuf {
+        if let Some(ws) = self.workspace.as_ref() {
+            return ws.root().to_path_buf();
+        }
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+    }
+
+    /// Default shell argv: `$SHELL -l` falling back to `/bin/zsh -l`.
+    /// `-l` so login dotfiles (PATH from `~/.zprofile` etc.) are loaded.
+    fn default_shell_argv() -> Vec<String> {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        vec![shell, "-l".into()]
+    }
+
+    fn on_terminal_new(&mut self, _: &TerminalNew, _: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self.terminal_cwd();
+        let argv_owned = Self::default_shell_argv();
+        let argv: Vec<&str> = argv_owned.iter().map(|s| s.as_str()).collect();
+        match terminal::Terminal::spawn(&argv, &cwd, 100, 30) {
+            Ok(term) => {
+                self.terminal = Some(term);
+                self.dock = DockPane::Terminal;
+                self.status = format!("terminal: {} in {}", argv_owned[0], cwd.display()).into();
+            }
+            Err(e) => {
+                self.status = format!("terminal spawn failed: {e}").into();
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_terminal_kill(&mut self, _: &TerminalKill, _: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal.take().is_some() {
+            self.status = "terminal closed".into();
+        } else {
+            self.status = "no terminal to close".into();
+        }
+        cx.notify();
+    }
+
+    /// Spawn a terminal seeded with `expo start`. Picks the run
+    /// command from the workspace kind so generic projects fall back
+    /// to a shell prompt instead of guessing.
+    fn on_terminal_expo_start(
+        &mut self,
+        _: &TerminalExpoStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cwd = self.terminal_cwd();
+        let cmd = match self.workspace.as_ref().map(|w| w.kind()) {
+            Some(workspace::ProjectKind::Expo) | None => "npx expo start",
+            Some(workspace::ProjectKind::ReactNative) => "npx react-native start",
+            Some(_) => "npm run dev",
+        };
+        let argv = ["/bin/sh", "-lc", cmd];
+        match terminal::Terminal::spawn(&argv, &cwd, 100, 30) {
+            Ok(term) => {
+                self.terminal = Some(term);
+                self.dock = DockPane::Terminal;
+                self.status = format!("running: {cmd}").into();
+            }
+            Err(e) => {
+                self.status = format!("terminal spawn failed: {e}").into();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Drain pending PTY dirty pings. Called once per render frame.
+    pub(crate) fn drain_terminal(&mut self, cx: &mut Context<Self>) {
+        if let Some(term) = self.terminal.as_ref() {
+            if term.drain_dirty() {
+                cx.notify();
+            }
+        }
+    }
+
+    /// Forward a key to the terminal's PTY when the Terminal dock is
+    /// active. Returns true when the key was consumed.
+    pub(crate) fn forward_key_to_terminal(&mut self, key: &gpui::Keystroke) -> bool {
+        let Some(term) = self.terminal.as_mut() else {
+            return false;
+        };
+        // Map gpui keys to PTY bytes. Coverage: printable keys via
+        // key_char, Enter, Tab, Backspace, arrows, plus ctrl-<letter>.
+        let bytes: Vec<u8> = if key.modifiers.control {
+            // ctrl-a..z -> 0x01..0x1a
+            if key.key.len() == 1 {
+                let c = key.key.chars().next().unwrap().to_ascii_lowercase();
+                if c.is_ascii_lowercase() {
+                    vec![c as u8 - b'a' + 1]
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        } else {
+            match key.key.as_str() {
+                "enter" => vec![b'\r'],
+                "tab" => vec![b'\t'],
+                "backspace" => vec![0x7f],
+                "escape" => vec![0x1b],
+                "left" => b"\x1b[D".to_vec(),
+                "right" => b"\x1b[C".to_vec(),
+                "up" => b"\x1b[A".to_vec(),
+                "down" => b"\x1b[B".to_vec(),
+                "home" => b"\x1b[H".to_vec(),
+                "end" => b"\x1b[F".to_vec(),
+                _ => {
+                    if let Some(s) = key.key_char.as_deref() {
+                        s.as_bytes().to_vec()
+                    } else {
+                        return false;
+                    }
+                }
+            }
+        };
+        if let Err(e) = term.send_input(&bytes) {
+            tracing::warn!(target: "atomio", error = %e, "pty write failed");
+        }
+        true
     }
     fn on_clear_network(&mut self, _: &ClearNetwork, _: &mut Window, cx: &mut Context<Self>) {
         self.network.clear();
@@ -1586,6 +1736,19 @@ impl AtomioWindow {
         let keystroke = &event.keystroke;
         let m = &keystroke.modifiers;
 
+        // Terminal dock takes input first when active and palette isn't
+        // open. Cmd-modified strokes still flow to actions (cmd-j, etc.)
+        // so the user can toggle panes without leaving the terminal.
+        if matches!(self.dock, DockPane::Terminal)
+            && self.palette_query.is_none()
+            && !m.platform
+            && self.terminal.is_some()
+            && self.forward_key_to_terminal(keystroke)
+        {
+            cx.notify();
+            return;
+        }
+
         // When the palette is open, only accept printable chars for the query.
         if let Some(query) = &mut self.palette_query {
             if m.control || m.alt || m.function || m.platform {
@@ -1808,6 +1971,8 @@ fn main() {
                 KeyBinding::new("cmd-5", ShowProfiler, Some("atomio")),
                 KeyBinding::new("cmd-6", ShowConsole, Some("atomio")),
                 KeyBinding::new("cmd-7", ShowNetwork, Some("atomio")),
+                KeyBinding::new("cmd-j", ShowTerminal, Some("atomio")),
+                KeyBinding::new("cmd-shift-j", TerminalNew, Some("atomio")),
             ]);
 
             let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
@@ -1897,6 +2062,7 @@ fn main() {
                             recents,
                             expanded_dirs: HashSet::new(),
                             fs_watcher,
+                            terminal: None,
                             pending_jump: None,
                             event_buf: Vec::new(),
                         })
