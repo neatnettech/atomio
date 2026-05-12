@@ -226,6 +226,21 @@ pub(crate) fn json_preview(v: &serde_json::Value) -> String {
     }
 }
 
+/// Format a filesystem path for display, substituting `$HOME` with
+/// `~` so the launch screen / recents rows show `~/code/foo` instead
+/// of `/Users/me/code/foo`. Falls back to the raw display string when
+/// the home directory is unknown or the path lives outside it.
+pub(crate) fn home_relative(path: &std::path::Path) -> String {
+    let Some(home) = dirs::home_dir() else {
+        return path.display().to_string();
+    };
+    match path.strip_prefix(&home) {
+        Ok(rel) if rel.as_os_str().is_empty() => "~".to_string(),
+        Ok(rel) => format!("~/{}", rel.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
 pub(crate) fn url_basename(url: &str) -> String {
     let trimmed = url.split('?').next().unwrap_or(url);
     if let Some(idx) = trimmed.rfind('/') {
@@ -1676,7 +1691,7 @@ impl AtomioWindow {
                 .child(format!("Recent ({})", self.recents.len())),
         );
         for (i, entry) in self.recents.entries().iter().enumerate() {
-            let display_path = entry.path.display().to_string();
+            let display_path = home_relative(&entry.path);
             wrap = wrap.child(
                 div()
                     .id(SharedString::from(format!("launch-recent-{i}")))
@@ -2260,6 +2275,27 @@ mod tests {
     fn short_ws_url_handles_wss() {
         let s = short_ws_url("wss://example.com:443/x");
         assert_eq!(s, "example.com:443/x");
+    }
+
+    #[test]
+    fn home_relative_returns_raw_when_outside_home() {
+        // /etc lives outside any user's home, so the result is the raw
+        // display string regardless of what HOME is set to.
+        let s = home_relative(std::path::Path::new("/etc/hosts"));
+        assert_eq!(s, "/etc/hosts");
+    }
+
+    #[test]
+    fn home_relative_substitutes_home_prefix() {
+        // Use whatever dirs::home_dir() currently reports so this test
+        // doesn't mutate process-global env (which would race with
+        // parallel tests that also read HOME).
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let inside = home.join("code").join("foo");
+        assert_eq!(home_relative(&inside), "~/code/foo");
+        assert_eq!(home_relative(&home), "~");
     }
 
     #[test]

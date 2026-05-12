@@ -432,6 +432,27 @@ impl AtomioWindow {
         .detach();
     }
 
+    /// Best starting directory for the project picker. Prefers the
+    /// parent of the currently-open project (so siblings are one click
+    /// away), then the parent of the newest recent, then `$HOME`. Falls
+    /// back to `/` when home is unknown -- the native picker handles
+    /// that gracefully.
+    fn picker_start_dir(&self) -> PathBuf {
+        if let Some(ws) = self.workspace.as_ref() {
+            if let Some(parent) = ws.root().parent() {
+                return parent.to_path_buf();
+            }
+        }
+        if let Some(recent) = self.recents.entries().first() {
+            if let Some(parent) = recent.path.parent() {
+                if parent.exists() {
+                    return parent.to_path_buf();
+                }
+            }
+        }
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+    }
+
     /// Open a project directory via the native picker. Spawned on the
     /// gpui run loop per the rfd safety rule. On success: replaces
     /// `self.workspace`, bumps the recents list, updates the status
@@ -439,9 +460,11 @@ impl AtomioWindow {
     /// lands somewhere visibly different.
     fn on_open_project(&mut self, _: &OpenProject, _window: &mut Window, cx: &mut Context<Self>) {
         self.status = "opening project…".into();
+        let start_dir = self.picker_start_dir();
         cx.spawn(async move |this, cx| {
             let picked = rfd::AsyncFileDialog::new()
                 .set_title("Open project")
+                .set_directory(&start_dir)
                 .pick_folder()
                 .await;
             let Some(folder) = picked else {
