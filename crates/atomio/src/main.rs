@@ -17,7 +17,7 @@ mod theme;
 use render::{extract_idents, spans_to_line_runs, LineView};
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use cdp_bridge::{ConnectionState, DebuggerBridge, DebuggerCommand, DebuggerEvent};
@@ -1539,13 +1539,19 @@ impl AtomioWindow {
         }
         if let Some(ws) = self.workspace.as_mut() {
             let n = ws.refresh();
-            let live_dirs: HashSet<PathBuf> = ws
+            // Borrow live directory paths out of the refreshed files
+            // slice rather than cloning each PathBuf -- the set lives
+            // only for this retain call. expanded_dirs is a disjoint
+            // field, so the immutable borrow of ws.files() and the
+            // mutable borrow of self.expanded_dirs coexist fine.
+            let live_dirs: HashSet<&Path> = ws
                 .files()
                 .iter()
                 .filter(|e| e.kind == workspace::FileKind::Directory)
-                .map(|e| e.path.clone())
+                .map(|e| e.path.as_path())
                 .collect();
-            self.expanded_dirs.retain(|p| live_dirs.contains(p));
+            self.expanded_dirs
+                .retain(|p| live_dirs.contains(p.as_path()));
             tracing::debug!(target: "atomio", file_count = n, "workspace refreshed");
             cx.notify();
         }
