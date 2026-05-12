@@ -51,6 +51,8 @@ pub(crate) fn highlight_color(kind: HighlightKind) -> u32 {
         HighlightKind::Attribute => theme::SX_PROP,
         HighlightKind::Property => theme::SX_PROP,
         HighlightKind::Constant => theme::SX_NUM,
+        HighlightKind::Variable => theme::SX_PL,
+        HighlightKind::Tag => theme::SX_COMP,
     }
 }
 
