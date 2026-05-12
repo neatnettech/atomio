@@ -17,7 +17,7 @@ mod theme;
 use render::{extract_idents, spans_to_line_runs, LineView};
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use cdp_bridge::{ConnectionState, DebuggerBridge, DebuggerCommand, DebuggerEvent};
@@ -1526,6 +1526,10 @@ impl AtomioWindow {
     /// re-scan the tree when anything came through. Cheap when there
     /// are no ticks (one channel try_recv); the rescan itself is the
     /// existing `ignore`-walker cap'd at `DEFAULT_MAX_ENTRIES`.
+    ///
+    /// After the rescan, prunes `expanded_dirs` to only the
+    /// directories still present in the tree so a deleted folder
+    /// doesn't leave stale expansion state hanging around.
     pub(crate) fn drain_workspace_events(&mut self, cx: &mut Context<Self>) {
         let Some(watcher) = self.fs_watcher.as_ref() else {
             return;
@@ -1535,6 +1539,19 @@ impl AtomioWindow {
         }
         if let Some(ws) = self.workspace.as_mut() {
             let n = ws.refresh();
+            // Borrow live directory paths out of the refreshed files
+            // slice rather than cloning each PathBuf -- the set lives
+            // only for this retain call. expanded_dirs is a disjoint
+            // field, so the immutable borrow of ws.files() and the
+            // mutable borrow of self.expanded_dirs coexist fine.
+            let live_dirs: HashSet<&Path> = ws
+                .files()
+                .iter()
+                .filter(|e| e.kind == workspace::FileKind::Directory)
+                .map(|e| e.path.as_path())
+                .collect();
+            self.expanded_dirs
+                .retain(|p| live_dirs.contains(p.as_path()));
             tracing::debug!(target: "atomio", file_count = n, "workspace refreshed");
             cx.notify();
         }
@@ -2044,12 +2061,26 @@ fn main() {
                                 format!("open_recent:{i}"),
                             );
                         }
-                        // Try to re-open the last project. Silently skip
-                        // when the path vanished or fails to open — the
-                        // launch-screen recents list still offers it.
-                        let workspace: Option<Workspace> = initial_ws_root
-                            .as_ref()
-                            .and_then(|p| Workspace::open(p).ok());
+                        // Try to re-open the last project. Logs the
+                        // failure path + cause so the user can tell why
+                        // they landed on the launch screen instead of
+                        // their project; the launch-screen recents list
+                        // still offers a click-to-reopen if applicable.
+                        let workspace: Option<Workspace> =
+                            initial_ws_root
+                                .as_ref()
+                                .and_then(|p| match Workspace::open(p) {
+                                    Ok(w) => Some(w),
+                                    Err(e) => {
+                                        tracing::info!(
+                                            target: "atomio",
+                                            path = %p.display(),
+                                            error = %e,
+                                            "auto-reopen failed, showing launch screen"
+                                        );
+                                        None
+                                    }
+                                });
                         let fs_watcher = workspace
                             .as_ref()
                             .and_then(|w| WorkspaceWatcher::spawn(w.root()).ok());
