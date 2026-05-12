@@ -506,12 +506,20 @@ impl AtomioWindow {
             })
             .collect();
 
+        // Editor content is the scrollable region. Needs an id to
+        // become a Stateful<Div> so overflow_y_scroll engages; also
+        // overflow_hidden on x to suppress horizontal overflow until
+        // soft wrap lands. Without this, long buffers grow the row
+        // past viewport height and push the right dock off-screen.
         let mut content = div()
+            .id(SharedString::from("editor-scroll"))
             .flex_1()
             .py_4()
             .flex()
             .flex_col()
-            .text_color(rgb(theme::TX_1));
+            .text_color(rgb(theme::TX_1))
+            .overflow_y_scroll()
+            .overflow_x_hidden();
         for lv in line_views {
             let LineView {
                 number,
@@ -712,6 +720,8 @@ impl AtomioWindow {
             .w(px(360.0))
             .flex()
             .flex_col()
+            .min_h(px(0.0))
+            .overflow_hidden()
             .bg(rgb(theme::BG_2))
             .border_l_1()
             .border_color(rgb(theme::LINE_1))
@@ -1714,7 +1724,13 @@ impl AtomioWindow {
                 ws.files().len()
             ));
 
-        let mut list = div().flex().flex_col().pb_2();
+        let mut list = div()
+            .id(SharedString::from("file-tree-scroll"))
+            .flex_1()
+            .flex()
+            .flex_col()
+            .pb_2()
+            .overflow_y_scroll();
         let mut collapsed_until_depth: Option<usize> = None;
         for entry in ws.files() {
             if let Some(d) = collapsed_until_depth {
@@ -2163,10 +2179,16 @@ impl Render for AtomioWindow {
                     ),
             )
             .child(
+                // Main row clips internally so a long editor buffer
+                // can't grow past viewport height and push the right
+                // dock off-screen. The editor pane carries its own
+                // overflow_y_scroll for the actual scrolling.
                 div()
                     .flex_1()
                     .flex()
                     .flex_row()
+                    .min_h(px(0.0))
+                    .overflow_hidden()
                     .child(self.render_activity_bar(cx))
                     .child(self.render_editor_pane(line_views, gutter_width, cx))
                     .child(self.render_dock(cx)),
