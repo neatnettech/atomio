@@ -43,6 +43,7 @@ actions!(
         OpenFile,
         OpenProject,
         SaveFile,
+        RevertToSaved,
         MoveLeft,
         MoveRight,
         MoveUp,
@@ -251,6 +252,7 @@ fn build_command_registry() -> CommandRegistry {
     reg.register("File: Open", "open_file");
     reg.register("File: Open Project…", "open_project");
     reg.register("File: Save", "save_file");
+    reg.register("File: Revert to Saved", "revert_to_saved");
     reg.register("Edit: Undo", "undo");
     reg.register("Edit: Redo", "redo");
     reg.register("Edit: Copy", "copy");
@@ -633,6 +635,33 @@ impl AtomioWindow {
         cx.notify();
     }
 
+    fn on_revert_to_saved(
+        &mut self,
+        _: &RevertToSaved,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // No-op when the buffer is unsaved scratch or a Metro-served
+        // source (no on-disk file to revert to). The status nudge tells
+        // the user why nothing happened so the keystroke doesn't feel
+        // dead.
+        let Some(path) = self.state.buffer.path().map(|p| p.to_path_buf()) else {
+            self.status = "no file to revert".into();
+            cx.notify();
+            return;
+        };
+        match Buffer::open(&path) {
+            Ok(buf) => {
+                self.state.reload_buffer(buf);
+                self.status = format!("reverted {}", path.display()).into();
+            }
+            Err(e) => {
+                self.status = format!("revert failed: {e}").into();
+            }
+        }
+        cx.notify();
+    }
+
     fn on_save(&mut self, _: &SaveFile, _window: &mut Window, cx: &mut Context<Self>) {
         if self.state.buffer.path().is_some() {
             self.status = match self.state.buffer.save() {
@@ -932,6 +961,7 @@ impl AtomioWindow {
             "open_file" => self.on_open(&OpenFile, window, cx),
             "open_project" => self.on_open_project(&OpenProject, window, cx),
             "save_file" => self.on_save(&SaveFile, window, cx),
+            "revert_to_saved" => self.on_revert_to_saved(&RevertToSaved, window, cx),
             "undo" => self.on_undo(&Undo, window, cx),
             "redo" => self.on_redo(&Redo, window, cx),
             "copy" => self.on_copy(&Copy, window, cx),
@@ -1986,6 +2016,7 @@ fn main() {
             cx.bind_keys([
                 KeyBinding::new("cmd-o", OpenFile, Some("atomio")),
                 KeyBinding::new("cmd-s", SaveFile, Some("atomio")),
+                KeyBinding::new("cmd-shift-r", RevertToSaved, Some("atomio")),
                 KeyBinding::new("left", MoveLeft, Some("atomio")),
                 KeyBinding::new("right", MoveRight, Some("atomio")),
                 KeyBinding::new("up", MoveUp, Some("atomio")),

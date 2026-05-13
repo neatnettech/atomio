@@ -51,7 +51,7 @@ Crates that exist today: `atomio`, `editor_core`, `language`, `debugger`, `conso
 
 1. **Editing logic lives in `editor_core`, never in `crates/atomio/src/main.rs`.** `main.rs` is purely a translation layer: gpui events -> `EditorState` method calls -> `cx.notify()`. If you find yourself writing rope or selection logic in the UI crate, stop and put it in `editor_core::state` with a unit test.
 2. **`editor_core` has zero gpui / AppKit / async dependencies.** It must stay testable with plain `cargo test -p editor_core` and no display.
-3. **Undo model.** Every mutation in `EditorState` pushes an inverse `Edit` onto the undo stack and clears redo. Don't bypass this by calling `Buffer::insert` / `Buffer::remove` directly from outside `state.rs`.
+3. **Undo model.** `EditorState` represents history as groups of inverse `Edit`s — runs of single-character typing collapse into one group, cursor moves and other non-edit actions break the active group. Always go through `push_edit(edit, pre_selection)`, never push to `self.undo` directly, and never call `Buffer::insert` / `Buffer::remove` from outside `state.rs`. See "Editor primitives" below for the full model.
 4. **gpui version is pinned to `0.2`** from crates.io. Don't switch to a git pin or vendor a fork without explicit approval.
 5. **Native dialogs (`rfd`) must be triggered from inside `cx.spawn` / the gpui run loop, never before `Application::new().run()`.** Calling rfd at startup races NSApplication initialization and crashes AppKit (`Ivar platform not found on NSKVONotifying_NSApplication`). This already burned us once.
 6. **Debugger protocol logic lives in `debugger`, not in UI crates.** The `debugger` crate owns the CDP WebSocket connection, breakpoint state, step control. UI crates read its model and send commands. Same pattern as editor_core: model is pure, UI is thin.
@@ -59,6 +59,30 @@ Crates that exist today: `atomio`, `editor_core`, `language`, `debugger`, `conso
 8. **Workspace logic lives in `workspace`, not in UI crates.** The crate owns project root, manifest, file tree model, and the `notify` watcher. UI consumes a read-only view.
 9. **Terminal logic lives in `terminal`, not in UI crates.** PTY spawn, ANSI parsing, grid + scrollback all sit in the model crate. UI is a thin grid renderer + keyboard forwarder. Same pattern as `editor_core`.
 10. **Plugin API lives in `plugin_api`.** Built-in panes (network, react, inspector, future redux/zustand/mmkv inspectors) implement the same `AtomioPlugin` trait third-party panes will. Compile-time discovery via `inventory`. Dynamic `cdylib` loading is post-v1.0.
+
+## Editor primitives
+
+The editor model is aligned with what makes Zed feel native by default: sensible primitives in the model crate, no config required, UI consumes a thin view. Three foundation primitives -- don't bypass them, and prefer them over ad-hoc state when adding a feature that touches buffer positions or history.
+
+### Grouped undo
+
+`editor_core::state` stores history as `Vec<UndoGroup>`, not `Vec<Edit>`. Single-character inserts at the caret merge into the current group; runs of backspaces and delete-forwards merge similarly. The active group breaks open on a cursor move, selection change, newline, edit-type switch, or `undo` / `redo` itself. Each group stores the pre-edit `Selection` so undo restores the caret exactly where the user started the run -- not wherever the inverse of the last applied edit happens to leave it.
+
+Implication for new code: every edit site must call `EditorState::push_edit(edit, pre_selection)` with the selection captured **before** `edit.apply` ran. Don't push to `self.undo` directly.
+
+### Anchors
+
+`editor_core::Buffer` carries a `BTreeMap<Anchor, usize>` of opaque per-buffer handles that survive subsequent `insert` / `remove` calls. Insertion bias is **right** (an anchor at the exact insertion point gets pushed past the new text). Removal that contains an anchor collapses it to the deletion's start byte so the anchor stays alive rather than vanishing.
+
+When a feature needs a position that should track content across edits -- breakpoints, multi-cursors, diagnostics, search results -- use an `Anchor`, not a raw `(line, col)` or char offset. Anchors are `Copy + Hash + Ord` so they slot into any map or set.
+
+The anchor map is per-buffer and dies when the buffer instance dies. For positions that need to outlive a buffer swap (e.g. cursor across disk reload), use `EditorState::reload_buffer` instead -- that's what it's for.
+
+### Cursor-stable reload
+
+`EditorState::replace_buffer(buf)` resets the cursor to char 0. That's the right call for "open a different file" (`Cmd+O`, file-tree open, Metro source fetch).
+
+`EditorState::reload_buffer(buf)` is the right call for "same file, new disk contents": it captures the cursor's `(line, col)` on the old buffer and re-applies it to the new buffer with line/col clamping. History is cleared because on-disk content is a new timeline. The `read_only` flag is preserved. Use it for revert-to-saved, future auto-reload on disk change, and any other "the bytes changed but the user is still reading this file" path.
 
 ## Development practices
 
@@ -98,6 +122,7 @@ Requires full Xcode (not just CLT) -- gpui compiles Metal shaders at build time 
 |---|---|
 | Cmd+O | Open file (native dialog) |
 | Cmd+S | Save (native save-as if no path) |
+| Cmd+Shift+R | Revert to saved (reload from disk, preserves cursor line/col) |
 | Cmd+Z | Undo |
 | Cmd+Shift+Z | Redo |
 | Cmd+C / Cmd+X / Cmd+V | Copy / Cut / Paste |
