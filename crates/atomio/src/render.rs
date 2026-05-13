@@ -2109,6 +2109,7 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_open))
             .on_action(cx.listener(Self::on_open_project))
             .on_action(cx.listener(Self::on_save))
+            .on_action(cx.listener(Self::on_revert_to_saved))
             .on_action(cx.listener(Self::on_move_left))
             .on_action(cx.listener(Self::on_move_right))
             .on_action(cx.listener(Self::on_move_up))

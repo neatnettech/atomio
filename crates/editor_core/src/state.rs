@@ -191,6 +191,28 @@ impl EditorState {
         self.break_group = true;
     }
 
+    /// Replace the backing buffer's contents while keeping the caret
+    /// on the same `(line, column)` it occupied before, clamped to
+    /// the new buffer. Used for "revert to saved" / disk-reload
+    /// flows where the user expects to stay roughly where they were
+    /// reading, not jump back to the top of the file.
+    ///
+    /// History is cleared because the on-disk content is a new
+    /// timeline -- old inverses no longer match the buffer. The
+    /// `read_only` flag is preserved.
+    pub fn reload_buffer(&mut self, buffer: Buffer) {
+        let (line, col) = self.cursor_line_col();
+        self.buffer = buffer;
+        self.undo.clear();
+        self.redo.clear();
+        self.break_group = true;
+        // Reuse the existing clamp logic so a line or column past the
+        // new buffer's end snaps to the closest valid position rather
+        // than panicking.
+        self.selection = Selection::caret(0);
+        self.move_cursor_to(line, col);
+    }
+
     /// Insert `text` at the caret, replacing any active selection first.
     pub fn insert_str(&mut self, text: &str) {
         if self.read_only || text.is_empty() {
@@ -847,6 +869,73 @@ mod tests {
         st.insert_str("hello");
         st.undo();
         assert_eq!(st.buffer.to_string(), "");
+    }
+
+    // ------- reload_buffer (preserves cursor) -------
+
+    #[test]
+    fn reload_buffer_preserves_cursor_when_file_unchanged() {
+        let mut st = state_from("alpha\nbeta\ngamma");
+        st.move_cursor_to(1, 2); // mid-"beta"
+        st.reload_buffer("alpha\nbeta\ngamma".parse().unwrap());
+        assert_eq!(st.cursor_line_col(), (1, 2));
+    }
+
+    #[test]
+    fn reload_buffer_preserves_cursor_when_lines_added() {
+        let mut st = state_from("alpha\nbeta\ngamma");
+        st.move_cursor_to(2, 3); // line 2, col 3
+                                 // Disk grew: a new line was prepended.
+        st.reload_buffer("zero\nalpha\nbeta\ngamma".parse().unwrap());
+        // Same (line, col) on the new buffer. We don't follow content;
+        // this is "stay where you were reading" semantics.
+        assert_eq!(st.cursor_line_col(), (2, 3));
+    }
+
+    #[test]
+    fn reload_buffer_clamps_line_when_file_shrank() {
+        let mut st = state_from("a\nb\nc\nd\ne");
+        st.move_cursor_to(4, 0);
+        // Disk shrank to 2 lines. Line 4 doesn't exist any more.
+        st.reload_buffer("x\ny".parse().unwrap());
+        // Clamps to the last line of the new buffer.
+        assert_eq!(st.cursor_line_col(), (1, 0));
+    }
+
+    #[test]
+    fn reload_buffer_clamps_column_when_line_shrank() {
+        let mut st = state_from("hello world");
+        st.move_cursor_to(0, 9);
+        st.reload_buffer("hi".parse().unwrap());
+        // Column past EOL clamps to EOL on the new shorter line.
+        assert_eq!(st.cursor_line_col(), (0, 2));
+    }
+
+    #[test]
+    fn reload_buffer_clears_history() {
+        let mut st = state_from("");
+        st.insert_str("a");
+        st.insert_str("b");
+        st.reload_buffer("fresh".parse().unwrap());
+        // Undo would normally roll back "ab", but reload threw away
+        // history -- the on-disk content is the new ground truth.
+        st.undo();
+        assert_eq!(st.buffer.to_string(), "fresh");
+    }
+
+    #[test]
+    fn reload_buffer_preserves_read_only_flag() {
+        let mut st = state_from("a\nb\nc");
+        st.set_read_only(true);
+        st.reload_buffer("x\ny\nz".parse().unwrap());
+        assert!(st.is_read_only());
+    }
+
+    #[test]
+    fn reload_buffer_from_empty_buffer_lands_at_origin() {
+        let mut st = state_from("");
+        st.reload_buffer("disk content".parse().unwrap());
+        assert_eq!(st.cursor_line_col(), (0, 0));
     }
 
     #[test]
