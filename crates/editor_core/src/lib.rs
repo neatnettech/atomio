@@ -17,7 +17,7 @@ pub mod command;
 pub mod selection;
 pub mod state;
 
-pub use buffer::Buffer;
+pub use buffer::{Anchor, Buffer};
 pub use command::CommandRegistry;
 pub use selection::Selection;
 pub use state::EditorState;
