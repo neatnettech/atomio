@@ -2199,6 +2199,8 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_terminal_new))
             .on_action(cx.listener(Self::on_terminal_kill))
             .on_action(cx.listener(Self::on_terminal_expo_start))
+            .on_action(cx.listener(Self::on_terminal_expo_prebuild))
+            .on_action(cx.listener(Self::on_terminal_npm_install))
             .on_action(cx.listener(Self::on_terminal_next_tab))
             .on_action(cx.listener(Self::on_terminal_prev_tab))
             .on_key_down(cx.listener(Self::on_key_down))
