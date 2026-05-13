@@ -245,6 +245,12 @@ struct AtomioWindow {
     /// stream of events (console logs / network ticks). Empty between
     /// drains; capacity grows to the high-water mark for the session.
     event_buf: Vec<DebuggerEvent>,
+    /// Filesystem mtime of the currently-open buffer's backing file at
+    /// the moment it was last loaded or saved. Used by the workspace
+    /// tick handler to detect external edits without reading the file
+    /// contents on every tick. `None` for unsaved scratch buffers and
+    /// Metro-served sources.
+    last_loaded_mtime: Option<std::time::SystemTime>,
 }
 
 fn build_command_registry() -> CommandRegistry {
@@ -422,6 +428,7 @@ impl AtomioWindow {
                 match result {
                     Ok(buf) => {
                         this.state.replace_buffer(buf);
+                        this.record_loaded_mtime(&path);
                         this.status = format!("opened {}", path.display()).into();
                     }
                     Err(e) => {
@@ -626,6 +633,7 @@ impl AtomioWindow {
                 self.state.replace_buffer(buf);
                 self.state.set_read_only(false);
                 self.current_url = None;
+                self.record_loaded_mtime(&abs);
                 self.status = format!("opened {}", rel.display()).into();
             }
             Err(e) => {
@@ -653,6 +661,7 @@ impl AtomioWindow {
         match Buffer::open(&path) {
             Ok(buf) => {
                 self.state.reload_buffer(buf);
+                self.record_loaded_mtime(&path);
                 self.status = format!("reverted {}", path.display()).into();
             }
             Err(e) => {
@@ -662,10 +671,71 @@ impl AtomioWindow {
         cx.notify();
     }
 
+    /// Snapshot the filesystem mtime of `path` into
+    /// `last_loaded_mtime`. Used as the baseline that
+    /// [`check_for_external_buffer_edit`] compares against on each
+    /// workspace tick. Failing to read mtime is silent -- the worst
+    /// case is one missed auto-reload, which the user can always
+    /// fix with the revert command.
+    fn record_loaded_mtime(&mut self, path: &Path) {
+        self.last_loaded_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    }
+
+    /// Detect that the currently-open buffer's backing file changed
+    /// on disk since we last loaded or saved it. Clean buffers
+    /// auto-reload in place with cursor preserved via
+    /// [`EditorState::reload_buffer`]. Dirty buffers are left alone
+    /// with a one-time status nudge so the user doesn't silently
+    /// lose edits; the new mtime is stashed so we don't nag every
+    /// tick for the same change.
+    ///
+    /// No-op for read-only buffers (Metro sources, log file) and
+    /// for unsaved scratch buffers. Files outside the workspace
+    /// root won't trigger this path at all -- the watcher only
+    /// covers the root subtree -- but that's an acceptable v1
+    /// limitation; revert-to-saved still works.
+    fn check_for_external_buffer_edit(&mut self, cx: &mut Context<Self>) {
+        if self.state.is_read_only() {
+            return;
+        }
+        let Some(path) = self.state.buffer.path().map(|p| p.to_path_buf()) else {
+            return;
+        };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return;
+        };
+        let Ok(disk_mtime) = meta.modified() else {
+            return;
+        };
+        if Some(disk_mtime) == self.last_loaded_mtime {
+            return;
+        }
+        if self.state.buffer.is_dirty() {
+            self.status = format!("external edit on {} (kept your edits)", path.display()).into();
+            self.last_loaded_mtime = Some(disk_mtime);
+            cx.notify();
+            return;
+        }
+        match Buffer::open(&path) {
+            Ok(buf) => {
+                self.state.reload_buffer(buf);
+                self.last_loaded_mtime = Some(disk_mtime);
+                self.status = format!("reloaded {}", path.display()).into();
+            }
+            Err(e) => {
+                self.status = format!("reload failed: {e}").into();
+            }
+        }
+        cx.notify();
+    }
+
     fn on_save(&mut self, _: &SaveFile, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.state.buffer.path().is_some() {
+        if let Some(path) = self.state.buffer.path().map(|p| p.to_path_buf()) {
             self.status = match self.state.buffer.save() {
-                Ok(()) => "saved".into(),
+                Ok(()) => {
+                    self.record_loaded_mtime(&path);
+                    "saved".into()
+                }
                 Err(e) => format!("save failed: {e}").into(),
             };
             cx.notify();
@@ -688,7 +758,10 @@ impl AtomioWindow {
             let path = file.path().to_path_buf();
             let _ = this.update(cx, |this, cx| {
                 this.status = match this.state.buffer.save_as(&path) {
-                    Ok(()) => format!("saved to {}", path.display()).into(),
+                    Ok(()) => {
+                        this.record_loaded_mtime(&path);
+                        format!("saved to {}", path.display()).into()
+                    }
                     Err(e) => format!("save failed: {e}").into(),
                 };
                 cx.notify();
@@ -1585,6 +1658,7 @@ impl AtomioWindow {
             tracing::debug!(target: "atomio", file_count = n, "workspace refreshed");
             cx.notify();
         }
+        self.check_for_external_buffer_edit(cx);
     }
 
     fn drain_bridge_events(&mut self, cx: &mut Context<Self>) {
@@ -2167,6 +2241,7 @@ fn main() {
                             terminal: None,
                             pending_jump: None,
                             event_buf: Vec::new(),
+                            last_loaded_mtime: None,
                         })
                     },
                 )
