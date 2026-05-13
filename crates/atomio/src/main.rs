@@ -95,6 +95,8 @@ actions!(
         TerminalNew,
         TerminalKill,
         TerminalExpoStart,
+        TerminalNextTab,
+        TerminalPrevTab,
     ]
 );
 
@@ -103,6 +105,15 @@ actions!(
 enum BpKind {
     Conditional,
     Logpoint,
+}
+
+/// One terminal tab. Pairs the PTY session with a user-visible title
+/// used in the tab strip. Title is chosen at spawn time by the
+/// handler (shell basename, "expo start", etc.) and doesn't update
+/// from runtime output -- that's a future polish.
+pub(crate) struct TerminalTab {
+    pub(crate) title: String,
+    pub(crate) pty: terminal::Terminal,
 }
 
 /// Right-dock pane selector. Mirrors the activity-bar items in the design
@@ -232,10 +243,16 @@ struct AtomioWindow {
     /// render loop drains it each frame and triggers `Workspace::refresh`
     /// when ticks arrive.
     fs_watcher: Option<WorkspaceWatcher>,
-    /// Embedded terminal session. `None` until `TerminalNew` spawns one.
-    /// v0.4 caps at one terminal per window; tabs land in v0.4 follow-up.
-    /// Dropping `Some(_)` closes the PTY and lets the reader thread exit.
-    terminal: Option<terminal::Terminal>,
+    /// Embedded terminal sessions, rendered as a tab strip when the
+    /// Terminal dock is active. Empty until `TerminalNew` /
+    /// `TerminalExpoStart` spawns one. Dropping a tab closes its PTY
+    /// and lets the reader thread exit.
+    terminals: Vec<TerminalTab>,
+    /// Index into `terminals` for the currently visible / focused tab.
+    /// Meaningful only when `terminals` is non-empty; mutations to
+    /// `terminals` keep this in bounds (`terminal_select` /
+    /// `kill_active_terminal`).
+    active_terminal: usize,
     /// `(url, line)` requested by a frame click while the buffer wasn't
     /// loaded yet. Applied once the matching [`DebuggerEvent::SourceFetched`]
     /// arrives, then cleared. Only the most recent click survives.
@@ -287,8 +304,10 @@ fn build_command_registry() -> CommandRegistry {
     reg.register("View: Network Pane", "show_network");
     reg.register("View: Terminal Pane", "show_terminal");
     reg.register("Terminal: New", "terminal_new");
-    reg.register("Terminal: Kill", "terminal_kill");
+    reg.register("Terminal: Kill Active Tab", "terminal_kill");
     reg.register("Terminal: expo start", "terminal_expo_start");
+    reg.register("Terminal: Next Tab", "terminal_next_tab");
+    reg.register("Terminal: Previous Tab", "terminal_prev_tab");
     reg.register("Network: Clear", "clear_network");
     reg.register("Components: Load Demo Tree", "components_load_demo");
     reg.register("Components: Clear", "components_clear");
@@ -1070,6 +1089,8 @@ impl AtomioWindow {
             "terminal_new" => self.on_terminal_new(&TerminalNew, window, cx),
             "terminal_kill" => self.on_terminal_kill(&TerminalKill, window, cx),
             "terminal_expo_start" => self.on_terminal_expo_start(&TerminalExpoStart, window, cx),
+            "terminal_next_tab" => self.on_terminal_next_tab(&TerminalNextTab, window, cx),
+            "terminal_prev_tab" => self.on_terminal_prev_tab(&TerminalPrevTab, window, cx),
             other if other.starts_with("open_recent:") => {
                 let idx: Option<usize> = other
                     .strip_prefix("open_recent:")
@@ -1265,14 +1286,67 @@ impl AtomioWindow {
         vec![shell, "-l".into()]
     }
 
+    /// Spawn a new terminal tab, append it to `terminals`, and make
+    /// it the active tab. Returns the spawn error so callers can
+    /// surface it in the status bar.
+    fn spawn_terminal_tab(
+        &mut self,
+        argv: &[&str],
+        cwd: &Path,
+        title: impl Into<String>,
+    ) -> std::io::Result<()> {
+        let pty = terminal::Terminal::spawn(argv, cwd, 100, 30)?;
+        self.terminals.push(TerminalTab {
+            title: title.into(),
+            pty,
+        });
+        self.active_terminal = self.terminals.len() - 1;
+        self.dock = DockPane::Terminal;
+        Ok(())
+    }
+
+    /// Read-only access to the currently active terminal tab, if any.
+    pub(crate) fn active_terminal(&self) -> Option<&TerminalTab> {
+        self.terminals.get(self.active_terminal)
+    }
+
+    /// Mutable access to the currently active terminal tab, if any.
+    /// Used by `forward_key_to_terminal` and the resize handler.
+    pub(crate) fn active_terminal_mut(&mut self) -> Option<&mut TerminalTab> {
+        self.terminals.get_mut(self.active_terminal)
+    }
+
+    /// Drop the active tab. Clamps `active_terminal` to a valid index
+    /// (or 0 when the Vec becomes empty -- which is fine because the
+    /// next access returns `None` via `Vec::get`).
+    fn kill_active_terminal(&mut self) -> Option<TerminalTab> {
+        if self.terminals.is_empty() {
+            return None;
+        }
+        let idx = self.active_terminal.min(self.terminals.len() - 1);
+        let tab = self.terminals.remove(idx);
+        if self.terminals.is_empty() {
+            self.active_terminal = 0;
+        } else if self.active_terminal >= self.terminals.len() {
+            self.active_terminal = self.terminals.len() - 1;
+        }
+        Some(tab)
+    }
+
     fn on_terminal_new(&mut self, _: &TerminalNew, _: &mut Window, cx: &mut Context<Self>) {
         let cwd = self.terminal_cwd();
         let argv_owned = Self::default_shell_argv();
         let argv: Vec<&str> = argv_owned.iter().map(|s| s.as_str()).collect();
-        match terminal::Terminal::spawn(&argv, &cwd, 100, 30) {
-            Ok(term) => {
-                self.terminal = Some(term);
-                self.dock = DockPane::Terminal;
+        // Title is the shell's basename ("zsh", "bash") so the tab
+        // strip stays readable. Fall back to the full argv[0] when
+        // the path has no terminal component.
+        let title = std::path::Path::new(&argv_owned[0])
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&argv_owned[0])
+            .to_string();
+        match self.spawn_terminal_tab(&argv, &cwd, title) {
+            Ok(()) => {
                 self.status = format!("terminal: {} in {}", argv_owned[0], cwd.display()).into();
             }
             Err(e) => {
@@ -1283,8 +1357,8 @@ impl AtomioWindow {
     }
 
     fn on_terminal_kill(&mut self, _: &TerminalKill, _: &mut Window, cx: &mut Context<Self>) {
-        if self.terminal.take().is_some() {
-            self.status = "terminal closed".into();
+        if let Some(tab) = self.kill_active_terminal() {
+            self.status = format!("closed: {}", tab.title).into();
         } else {
             self.status = "no terminal to close".into();
         }
@@ -1307,10 +1381,8 @@ impl AtomioWindow {
             Some(_) => "npm run dev",
         };
         let argv = ["/bin/sh", "-lc", cmd];
-        match terminal::Terminal::spawn(&argv, &cwd, 100, 30) {
-            Ok(term) => {
-                self.terminal = Some(term);
-                self.dock = DockPane::Terminal;
+        match self.spawn_terminal_tab(&argv, &cwd, cmd) {
+            Ok(()) => {
                 self.status = format!("running: {cmd}").into();
             }
             Err(e) => {
@@ -1320,21 +1392,69 @@ impl AtomioWindow {
         cx.notify();
     }
 
-    /// Drain pending PTY dirty pings. Called once per render frame.
+    /// Cycle to the next terminal tab, wrapping at the end. No-op
+    /// when there are 0 or 1 tabs.
+    pub(crate) fn on_terminal_next_tab(
+        &mut self,
+        _: &TerminalNextTab,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.terminals.len() <= 1 {
+            return;
+        }
+        self.active_terminal = (self.active_terminal + 1) % self.terminals.len();
+        cx.notify();
+    }
+
+    /// Cycle to the previous terminal tab, wrapping at the start.
+    /// Mirrors `on_terminal_next_tab`.
+    pub(crate) fn on_terminal_prev_tab(
+        &mut self,
+        _: &TerminalPrevTab,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.terminals.len() <= 1 {
+            return;
+        }
+        self.active_terminal = if self.active_terminal == 0 {
+            self.terminals.len() - 1
+        } else {
+            self.active_terminal - 1
+        };
+        cx.notify();
+    }
+
+    /// Switch to the terminal tab at `idx`. Out-of-range indexes
+    /// are ignored so a stale click handler can't crash the window.
+    pub(crate) fn select_terminal_tab(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx < self.terminals.len() && idx != self.active_terminal {
+            self.active_terminal = idx;
+            cx.notify();
+        }
+    }
+
+    /// Drain pending PTY dirty pings on the active tab. Called once
+    /// per render frame. Other tabs may have pending output too --
+    /// they'll repaint when the user switches to them, which is fine
+    /// because they're not on screen.
     pub(crate) fn drain_terminal(&mut self, cx: &mut Context<Self>) {
-        if let Some(term) = self.terminal.as_ref() {
-            if term.drain_dirty() {
+        if let Some(tab) = self.active_terminal() {
+            if tab.pty.drain_dirty() {
                 cx.notify();
             }
         }
     }
 
-    /// Forward a key to the terminal's PTY when the Terminal dock is
-    /// active. Returns true when the key was consumed.
+    /// Forward a key to the active terminal tab's PTY when the
+    /// Terminal dock is active. Returns true when the key was
+    /// consumed.
     pub(crate) fn forward_key_to_terminal(&mut self, key: &gpui::Keystroke) -> bool {
-        let Some(term) = self.terminal.as_mut() else {
+        let Some(tab) = self.active_terminal_mut() else {
             return false;
         };
+        let term = &mut tab.pty;
         // Map gpui keys to PTY bytes. Coverage: printable keys via
         // key_char, Enter, Tab, Backspace, arrows, plus ctrl-<letter>.
         let bytes: Vec<u8> = if key.modifiers.control {
@@ -1892,7 +2012,7 @@ impl AtomioWindow {
         if matches!(self.dock, DockPane::Terminal)
             && self.palette_query.is_none()
             && !m.platform
-            && self.terminal.is_some()
+            && !self.terminals.is_empty()
             && self.forward_key_to_terminal(keystroke)
         {
             cx.notify();
@@ -2135,6 +2255,8 @@ fn main() {
                 KeyBinding::new("cmd-7", ShowNetwork, Some("atomio")),
                 KeyBinding::new("cmd-j", ShowTerminal, Some("atomio")),
                 KeyBinding::new("cmd-shift-j", TerminalNew, Some("atomio")),
+                KeyBinding::new("cmd-shift-]", TerminalNextTab, Some("atomio")),
+                KeyBinding::new("cmd-shift-[", TerminalPrevTab, Some("atomio")),
             ]);
 
             let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
@@ -2238,7 +2360,8 @@ fn main() {
                             recents,
                             expanded_dirs: HashSet::new(),
                             fs_watcher,
-                            terminal: None,
+                            terminals: Vec::new(),
+                            active_terminal: 0,
                             pending_jump: None,
                             event_buf: Vec::new(),
                             last_loaded_mtime: None,
