@@ -1816,7 +1816,7 @@ impl AtomioWindow {
     /// with the spawn command + scrollback count + buttons for
     /// New / expo start / Kill. Empty state when no terminal is live.
     fn render_terminal_body(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let Some(term) = self.terminal.as_ref() else {
+        let Some(tab) = self.active_terminal() else {
             return div()
                 .flex()
                 .flex_col()
@@ -1851,7 +1851,40 @@ impl AtomioWindow {
                         })),
                 );
         };
-        let snap = term.snapshot();
+        let snap = tab.pty.snapshot();
+        // Tab strip above the header: one clickable cell per terminal,
+        // active tab highlighted. cmd+shift+]/[ cycles via keyboard;
+        // click is the mouse path.
+        let active_idx = self.active_terminal;
+        let mut tab_strip = div()
+            .flex()
+            .flex_row()
+            .gap_1()
+            .px_2()
+            .py(px(2.0))
+            .bg(rgb(theme::BG_1));
+        for (idx, t) in self.terminals.iter().enumerate() {
+            let is_active = idx == active_idx;
+            let bg = if is_active { theme::BG_3 } else { theme::BG_2 };
+            let fg = if is_active { theme::TX_1 } else { theme::TX_3 };
+            let id = SharedString::from(format!("term-tab-{idx}"));
+            let title = t.title.clone();
+            tab_strip = tab_strip.child(
+                div()
+                    .id(id)
+                    .px_2()
+                    .py(px(1.0))
+                    .rounded(px(3.0))
+                    .bg(rgb(bg))
+                    .text_color(rgb(fg))
+                    .text_xs()
+                    .hover(|s| s.bg(rgb(theme::BG_4)))
+                    .child(title)
+                    .on_click(cx.listener(move |this, _ev, _win, cx| {
+                        this.select_terminal_tab(idx, cx);
+                    })),
+            );
+        }
         let header = div()
             .flex()
             .flex_row()
@@ -1913,7 +1946,12 @@ impl AtomioWindow {
             grid = grid.child(row);
         }
 
-        div().flex().flex_col().child(header).child(grid)
+        div()
+            .flex()
+            .flex_col()
+            .child(tab_strip)
+            .child(header)
+            .child(grid)
     }
 
     /// Small inline button used in the terminal pane header. Pulled
@@ -2161,6 +2199,8 @@ impl Render for AtomioWindow {
             .on_action(cx.listener(Self::on_terminal_new))
             .on_action(cx.listener(Self::on_terminal_kill))
             .on_action(cx.listener(Self::on_terminal_expo_start))
+            .on_action(cx.listener(Self::on_terminal_next_tab))
+            .on_action(cx.listener(Self::on_terminal_prev_tab))
             .on_key_down(cx.listener(Self::on_key_down))
             .flex()
             .flex_col()
