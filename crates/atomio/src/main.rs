@@ -95,6 +95,8 @@ actions!(
         TerminalNew,
         TerminalKill,
         TerminalExpoStart,
+        TerminalExpoPrebuild,
+        TerminalNpmInstall,
         TerminalNextTab,
         TerminalPrevTab,
     ]
@@ -306,6 +308,8 @@ fn build_command_registry() -> CommandRegistry {
     reg.register("Terminal: New", "terminal_new");
     reg.register("Terminal: Kill Active Tab", "terminal_kill");
     reg.register("Terminal: expo start", "terminal_expo_start");
+    reg.register("Terminal: expo prebuild", "terminal_expo_prebuild");
+    reg.register("Terminal: npm install", "terminal_npm_install");
     reg.register("Terminal: Next Tab", "terminal_next_tab");
     reg.register("Terminal: Previous Tab", "terminal_prev_tab");
     reg.register("Network: Clear", "clear_network");
@@ -1089,6 +1093,10 @@ impl AtomioWindow {
             "terminal_new" => self.on_terminal_new(&TerminalNew, window, cx),
             "terminal_kill" => self.on_terminal_kill(&TerminalKill, window, cx),
             "terminal_expo_start" => self.on_terminal_expo_start(&TerminalExpoStart, window, cx),
+            "terminal_expo_prebuild" => {
+                self.on_terminal_expo_prebuild(&TerminalExpoPrebuild, window, cx)
+            }
+            "terminal_npm_install" => self.on_terminal_npm_install(&TerminalNpmInstall, window, cx),
             "terminal_next_tab" => self.on_terminal_next_tab(&TerminalNextTab, window, cx),
             "terminal_prev_tab" => self.on_terminal_prev_tab(&TerminalPrevTab, window, cx),
             other if other.starts_with("open_recent:") => {
@@ -1365,21 +1373,12 @@ impl AtomioWindow {
         cx.notify();
     }
 
-    /// Spawn a terminal seeded with `expo start`. Picks the run
-    /// command from the workspace kind so generic projects fall back
-    /// to a shell prompt instead of guessing.
-    fn on_terminal_expo_start(
-        &mut self,
-        _: &TerminalExpoStart,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Spawn a new terminal tab running `/bin/sh -lc <cmd>` in the
+    /// project cwd. The command doubles as the tab title and the
+    /// "running: ..." status. Used by every quick-spawn palette
+    /// entry (`expo start`, `expo prebuild`, `npm install`, ...).
+    fn spawn_shell_quick(&mut self, cmd: &str, cx: &mut Context<Self>) {
         let cwd = self.terminal_cwd();
-        let cmd = match self.workspace.as_ref().map(|w| w.kind()) {
-            Some(workspace::ProjectKind::Expo) | None => "npx expo start",
-            Some(workspace::ProjectKind::ReactNative) => "npx react-native start",
-            Some(_) => "npm run dev",
-        };
         let argv = ["/bin/sh", "-lc", cmd];
         match self.spawn_terminal_tab(&argv, &cwd, cmd) {
             Ok(()) => {
@@ -1390,6 +1389,48 @@ impl AtomioWindow {
             }
         }
         cx.notify();
+    }
+
+    /// Spawn a terminal seeded with `expo start`. Picks the run
+    /// command from the workspace kind so generic projects fall back
+    /// to `npm run dev` instead of guessing wrong.
+    fn on_terminal_expo_start(
+        &mut self,
+        _: &TerminalExpoStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cmd = match self.workspace.as_ref().map(|w| w.kind()) {
+            Some(workspace::ProjectKind::Expo) | None => "npx expo start",
+            Some(workspace::ProjectKind::ReactNative) => "npx react-native start",
+            Some(_) => "npm run dev",
+        };
+        self.spawn_shell_quick(cmd, cx);
+    }
+
+    /// Spawn a terminal running `npx expo prebuild`. No
+    /// workspace-kind branching -- if the project isn't an Expo app
+    /// the command surfaces its own error in the terminal, which is
+    /// the right place for that signal to land.
+    fn on_terminal_expo_prebuild(
+        &mut self,
+        _: &TerminalExpoPrebuild,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.spawn_shell_quick("npx expo prebuild", cx);
+    }
+
+    /// Spawn a terminal running `npm install` in the project cwd.
+    /// Works for any Node project regardless of detected workspace
+    /// kind; the lockfile (npm / yarn / pnpm) is the user's problem.
+    fn on_terminal_npm_install(
+        &mut self,
+        _: &TerminalNpmInstall,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.spawn_shell_quick("npm install", cx);
     }
 
     /// Cycle to the next terminal tab, wrapping at the end. No-op
