@@ -262,6 +262,30 @@ pub struct GridSnapshot {
     pub scrollback_len: usize,
 }
 
+impl GridSnapshot {
+    /// Visible viewport as text, one `String` per row, trailing spaces
+    /// trimmed. Used by callers that need to grep terminal output for
+    /// markers (e.g. atomio's Metro detection) without re-implementing
+    /// the row-major iteration. Blank rows come through as empty
+    /// strings so caller-side line numbers line up with the grid.
+    pub fn text_lines(&self) -> Vec<String> {
+        let cols = self.cols as usize;
+        if cols == 0 || self.rows == 0 {
+            return Vec::new();
+        }
+        (0..self.rows as usize)
+            .map(|r| {
+                let start = r * cols;
+                let row = &self.cells[start..start + cols];
+                let mut line: String = row.iter().map(|c| c.ch).collect();
+                let trimmed_len = line.trim_end().len();
+                line.truncate(trimmed_len);
+                line
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +296,63 @@ mod tests {
         assert_eq!(g.cells().len(), 8);
         assert!(g.cells().iter().all(|c| c.ch == ' '));
         assert_eq!(g.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn snapshot_text_lines_trims_trailing_spaces() {
+        let mut g = Grid::new(10, 2);
+        for ch in "hi".chars() {
+            g.print(ch);
+        }
+        g.line_feed();
+        g.carriage_return();
+        for ch in "metro".chars() {
+            g.print(ch);
+        }
+        let lines = g.snapshot().text_lines();
+        // Row 0 had "hi" followed by 8 spaces -> trims to "hi".
+        // Row 1 had "metro" followed by 5 spaces -> trims to "metro".
+        assert_eq!(lines, vec!["hi".to_string(), "metro".to_string()]);
+    }
+
+    #[test]
+    fn snapshot_text_lines_preserves_blank_rows() {
+        let mut g = Grid::new(4, 3);
+        for ch in "top".chars() {
+            g.print(ch);
+        }
+        // Skip row 1 entirely; print on row 2.
+        g.line_feed();
+        g.carriage_return();
+        g.line_feed();
+        g.carriage_return();
+        for ch in "bot".chars() {
+            g.print(ch);
+        }
+        let lines = g.snapshot().text_lines();
+        // Row 1 stays empty in the output so caller-side row numbers
+        // line up with the grid's row indices.
+        assert_eq!(
+            lines,
+            vec!["top".to_string(), "".to_string(), "bot".to_string()]
+        );
+    }
+
+    #[test]
+    fn snapshot_text_lines_handles_zero_dims() {
+        // Grid::new asserts cols > 0 && rows > 0, so a real Grid
+        // can never produce a 0-dim snapshot. But the public
+        // GridSnapshot struct has open fields, and `text_lines`
+        // guards against it -- assert that explicitly so the
+        // defensive branch doesn't bit-rot.
+        let snap = GridSnapshot {
+            cols: 0,
+            rows: 0,
+            cells: Vec::new(),
+            cursor: (0, 0),
+            scrollback_len: 0,
+        };
+        assert!(snap.text_lines().is_empty());
     }
 
     #[test]

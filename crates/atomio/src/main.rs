@@ -270,7 +270,19 @@ struct AtomioWindow {
     /// contents on every tick. `None` for unsaved scratch buffers and
     /// Metro-served sources.
     last_loaded_mtime: Option<std::time::SystemTime>,
+    /// Set to true once any terminal tab's output contains a Metro
+    /// start-up banner. Surfaces a "Metro detected -- Connect" pill
+    /// in the status bar so the user doesn't have to remember the
+    /// keybinding. Cleared on connect / disconnect so the pill is
+    /// transient -- it shows up exactly when it adds value.
+    metro_detected: bool,
 }
+
+/// Substrings the terminal scanner looks for in PTY output to decide
+/// Metro is running. Expo CLI prints "Metro waiting on" (and a URL);
+/// plain Metro prints "Welcome to Metro" at start-up. Both are
+/// printable ASCII so they survive ANSI styling in the grid cells.
+const METRO_BANNERS: &[&str] = &["Metro waiting", "Welcome to Metro"];
 
 fn build_command_registry() -> CommandRegistry {
     let mut reg = CommandRegistry::new();
@@ -1194,6 +1206,7 @@ impl AtomioWindow {
         if let Some(bridge) = &self.bridge {
             let _ = bridge.commands.send(DebuggerCommand::Disconnect);
         }
+        self.metro_detected = false;
         self.breakpoints.clear();
         self.paused = false;
         self.call_stack = None;
@@ -1480,12 +1493,58 @@ impl AtomioWindow {
     /// per render frame. Other tabs may have pending output too --
     /// they'll repaint when the user switches to them, which is fine
     /// because they're not on screen.
+    ///
+    /// Also runs the Metro detector once per frame on every tab
+    /// (not just the active one) -- the user may have spawned
+    /// `expo start` in tab A, switched to tab B to edit, and we
+    /// still want the connect prompt to appear. Detection is a
+    /// short string scan over the visible viewport; the cost is
+    /// negligible compared to render.
     pub(crate) fn drain_terminal(&mut self, cx: &mut Context<Self>) {
         if let Some(tab) = self.active_terminal() {
             if tab.pty.drain_dirty() {
                 cx.notify();
             }
         }
+        if self.should_scan_for_metro() && self.scan_terminals_for_metro() {
+            self.metro_detected = true;
+            self.status =
+                "Metro detected -- press Cmd+Shift+D or click \"Connect\" in the status bar".into();
+            cx.notify();
+        }
+    }
+
+    /// True when running the Metro detector would actually surface
+    /// useful UX: we haven't already detected, we aren't already
+    /// connecting / connected, and there's at least one terminal
+    /// tab to scan. Keeps the scan a no-op in the happy path
+    /// (connected user editing code) and in the empty path (no
+    /// terminal open).
+    fn should_scan_for_metro(&self) -> bool {
+        if self.metro_detected || self.terminals.is_empty() {
+            return false;
+        }
+        !matches!(
+            self.connection,
+            ConnectionState::Connecting { .. } | ConnectionState::Connected { .. }
+        )
+    }
+
+    /// Iterate every terminal tab and return true if any visible
+    /// viewport row contains a Metro start-up banner. Stops at the
+    /// first match. Doesn't touch scrollback -- the banner is the
+    /// first thing Metro prints, so it's still on screen during the
+    /// window when this signal is useful.
+    fn scan_terminals_for_metro(&self) -> bool {
+        for tab in &self.terminals {
+            let snap = tab.pty.snapshot();
+            for line in snap.text_lines() {
+                if METRO_BANNERS.iter().any(|b| line.contains(b)) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Forward a key to the active terminal tab's PTY when the
@@ -1857,6 +1916,20 @@ impl AtomioWindow {
                             format!("connect failed: {reason}").into()
                         }
                     };
+                    // Any transition out of Disconnected / Failed
+                    // means the user acted on the connect prompt
+                    // (or the bridge took itself there); the pill
+                    // has served its purpose. Re-arms naturally on
+                    // the next disconnect because the field flips
+                    // back to false in `on_disconnect`.
+                    if matches!(
+                        state,
+                        ConnectionState::Scanning
+                            | ConnectionState::Connecting { .. }
+                            | ConnectionState::Connected { .. }
+                    ) {
+                        self.metro_detected = false;
+                    }
                     self.connection = state;
                     changed = true;
                 }
@@ -2406,6 +2479,7 @@ fn main() {
                             pending_jump: None,
                             event_buf: Vec::new(),
                             last_loaded_mtime: None,
+                            metro_detected: false,
                         })
                     },
                 )
