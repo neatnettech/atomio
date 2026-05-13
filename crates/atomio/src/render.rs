@@ -2077,6 +2077,15 @@ impl Render for AtomioWindow {
             ConnectionState::Failed { .. } => theme::ERROR,
             ConnectionState::Disconnected => theme::TX_4,
         };
+        // Metro connect prompt: a clickable pill shown when the
+        // terminal scanner found a Metro banner and the bridge
+        // isn't already on its way. Click runs the existing
+        // Connect action, which scans localhost for a real ws URL.
+        let show_metro_pill = self.metro_detected
+            && !matches!(
+                self.connection,
+                ConnectionState::Connecting { .. } | ConnectionState::Connected { .. }
+            );
 
         let palette_overlay: Option<gpui::Div> = self.palette_query.as_ref().map(|query| {
             let matches = self.commands.search(query);
@@ -2266,17 +2275,32 @@ impl Render for AtomioWindow {
                     .border_color(rgb(theme::LINE_1))
                     .text_xs()
                     .text_color(rgb(theme::TX_3))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_3()
-                            .child(
+                    .child({
+                        let mut left = div().flex().gap_3().items_center().child(
+                            div()
+                                .text_color(rgb(connection_color))
+                                .child(connection_label),
+                        );
+                        if show_metro_pill {
+                            left = left.child(
                                 div()
-                                    .text_color(rgb(connection_color))
-                                    .child(connection_label),
-                            )
-                            .child(div().child(status)),
-                    )
+                                    .id(SharedString::from("metro-connect-pill"))
+                                    .px_2()
+                                    .py(px(1.0))
+                                    .rounded(px(3.0))
+                                    .bg(rgb(theme::ACCENT_SOFT))
+                                    .border_1()
+                                    .border_color(rgb(theme::ACCENT_LINE))
+                                    .text_color(rgb(theme::ACCENT))
+                                    .hover(|s| s.bg(rgb(theme::BG_3)))
+                                    .child("Metro detected — Connect")
+                                    .on_click(cx.listener(|this, _ev, win, cx| {
+                                        this.on_connect(&crate::Connect, win, cx);
+                                    })),
+                            );
+                        }
+                        left.child(div().child(status))
+                    })
                     .child(
                         div()
                             .flex()
