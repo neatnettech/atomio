@@ -102,10 +102,19 @@ actions!(
     ]
 );
 
-/// Breakpoint flavour for the conditional / logpoint palette flow.
-#[derive(Debug, Clone, Copy)]
-enum BpKind {
+/// Breakpoint flavour for sidebar labeling. The debugger crate only
+/// stores `condition: Option<String>`; this enum records the
+/// user-facing intent so the sidebar can show "Cond" / "Log" tags
+/// and `set_breakpoint_with_kind` can pick the right condition
+/// shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BpKind {
+    /// Ordinary breakpoint set by gutter click. No condition.
+    Line,
+    /// Halts only when the user's expression evaluates truthy.
     Conditional,
+    /// Side-effect `console.log(expr)` with a falsy result so the
+    /// runtime never halts. Acts as a non-pausing log probe.
     Logpoint,
 }
 
@@ -184,6 +193,12 @@ struct AtomioWindow {
     scripts: ScriptRegistry,
     /// Breakpoints set in the current debug session.
     breakpoints: BreakpointRegistry,
+    /// Per-breakpoint UI classification (line / conditional / logpoint).
+    /// Keyed by local `BreakpointId`. The debugger crate only knows
+    /// about an opaque `condition: Option<String>` -- this map keeps
+    /// the user-facing intent so the sidebar can label rows
+    /// correctly. Cleared together with `breakpoints` on disconnect.
+    breakpoint_kinds: HashMap<debugger::breakpoints::BreakpointId, BpKind>,
     /// True when runtime is paused at a breakpoint or step.
     paused: bool,
     /// Last paused-frames payload (raw CDP `callFrames`). Decoded on demand
@@ -1208,6 +1223,7 @@ impl AtomioWindow {
         }
         self.metro_detected = false;
         self.breakpoints.clear();
+        self.breakpoint_kinds.clear();
         self.paused = false;
         self.call_stack = None;
         self.properties.clear();
@@ -1665,7 +1681,15 @@ impl AtomioWindow {
     /// source. Sends the corresponding CDP command via the bridge.
     /// Set a conditional breakpoint or logpoint at the cursor's current line.
     /// `kind` selects which encoding to use; `expr` is the user's input.
+    /// Panics if called with `BpKind::Line` -- that variant uses the
+    /// gutter-toggle path (`toggle_breakpoint_at`) which doesn't take
+    /// an expression. Only `Conditional` and `Logpoint` are valid
+    /// inputs here; the palette dispatch sites enforce this.
     fn set_breakpoint_with_kind(&mut self, kind: BpKind, expr: &str, cx: &mut Context<Self>) {
+        debug_assert!(
+            !matches!(kind, BpKind::Line),
+            "set_breakpoint_with_kind called with Line variant; use toggle_breakpoint_at instead"
+        );
         let Some(url) = self.current_url.clone() else {
             self.status = "no source loaded — cmd+shift+o first".into();
             cx.notify();
@@ -1677,6 +1701,10 @@ impl AtomioWindow {
             BpKind::Conditional => format!("({expr})"),
             // Logpoint: side-effect log + always-falsy so runtime never halts.
             BpKind::Logpoint => format!("console.log({expr}), false"),
+            // Unreachable in release (debug_assert above catches the
+            // misuse); fall back to a plain expression so the bp at
+            // least gets set if someone routes here by mistake.
+            BpKind::Line => format!("({expr})"),
         };
         // If a bp already exists on this line, drop it first so we replace
         // it with the conditioned variant.
@@ -1687,6 +1715,7 @@ impl AtomioWindow {
             .map(|bp| (bp.id, bp.server_id.clone()));
         if let Some((id, server_id)) = existing {
             self.breakpoints.remove(id);
+            self.breakpoint_kinds.remove(&id);
             if let Some(sid) = server_id {
                 self.send_debug(DebuggerCommand::RemoveBreakpoint { server_id: sid });
             }
@@ -1694,6 +1723,7 @@ impl AtomioWindow {
         let local = self
             .breakpoints
             .set(url.clone(), line, None, Some(condition.clone()));
+        self.breakpoint_kinds.insert(local, kind);
         self.send_debug(DebuggerCommand::SetBreakpoint {
             local,
             url,
@@ -1704,6 +1734,9 @@ impl AtomioWindow {
         self.status = match kind {
             BpKind::Conditional => format!("conditional breakpoint @ ln {}: {expr}", line + 1),
             BpKind::Logpoint => format!("logpoint @ ln {}: {expr}", line + 1),
+            // Unreachable per debug_assert above; render as plain
+            // breakpoint so the status line still reflects the action.
+            BpKind::Line => format!("breakpoint @ ln {}: {expr}", line + 1),
         }
         .into();
         cx.notify();
@@ -1719,6 +1752,7 @@ impl AtomioWindow {
         let outcome = self.breakpoints.toggle(&url, line);
         match outcome {
             ToggleOutcome::Added(local) => {
+                self.breakpoint_kinds.insert(local, BpKind::Line);
                 self.send_debug(DebuggerCommand::SetBreakpoint {
                     local,
                     url: url.clone(),
@@ -1728,7 +1762,8 @@ impl AtomioWindow {
                 });
                 self.status = format!("breakpoint set @ {url}:{line}").into();
             }
-            ToggleOutcome::Removed { server_id, .. } => {
+            ToggleOutcome::Removed { local, server_id } => {
+                self.breakpoint_kinds.remove(&local);
                 if let Some(sid) = server_id {
                     self.send_debug(DebuggerCommand::RemoveBreakpoint { server_id: sid });
                 }
@@ -1997,9 +2032,20 @@ impl AtomioWindow {
                     }
                     changed = true;
                 }
-                DebuggerEvent::Paused { reason, call_stack } => {
+                DebuggerEvent::Paused {
+                    reason,
+                    call_stack,
+                    hit_breakpoints,
+                } => {
                     self.paused = true;
                     self.call_stack = Some(call_stack);
+                    // Fold the runtime's hit list into the local
+                    // registry so the breakpoint sidebar shows
+                    // per-breakpoint tallies. No-op for step /
+                    // pause / exception pauses (empty list).
+                    if !hit_breakpoints.is_empty() {
+                        self.breakpoints.record_hits(&hit_breakpoints);
+                    }
                     self.status = format!("paused ({reason})").into();
                     // Auto-switch dock to Debugger pane on pause so users
                     // see the call stack + scopes immediately.
@@ -2451,6 +2497,7 @@ fn main() {
                             bridge: Some(bridge),
                             scripts: ScriptRegistry::new(),
                             breakpoints: BreakpointRegistry::new(),
+                            breakpoint_kinds: HashMap::new(),
                             paused: false,
                             call_stack: None,
                             properties: HashMap::new(),

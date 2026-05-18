@@ -17,7 +17,7 @@ use language::{HighlightKind, Language, Span};
 
 use crate::cdp_bridge::{ConnectionState, DebuggerCommand};
 use crate::theme;
-use crate::{AtomioWindow, DockPane, ProfilerRefresh, SimulatorCapture};
+use crate::{AtomioWindow, BpKind, DockPane, ProfilerRefresh, SimulatorCapture};
 
 /// Per-line view used by the editor renderer. Built by
 /// [`AtomioWindow::buffer_line_views`] and consumed by
@@ -254,6 +254,47 @@ pub(crate) fn url_basename(url: &str) -> String {
         }
     } else {
         url.to_string()
+    }
+}
+
+/// Truncate `s` in the middle so the head + tail stay visible.
+/// Used for breakpoint condition snippets in the sidebar where a
+/// 200-char arrow function would otherwise blow the layout.
+pub(crate) fn truncate_mid(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max / 2 - 1).collect();
+    let tail: String = s
+        .chars()
+        .rev()
+        .take(max / 2 - 1)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("{head}…{tail}")
+}
+
+/// Strip the wrapping `set_breakpoint_with_kind` adds when encoding
+/// the user expression into a runtime-evaluable condition. The
+/// sidebar shows the user's intent, not the encoded form.
+/// `Conditional` wraps the expression in `({expr})`; `Logpoint`
+/// wraps in `console.log({expr}), false`. Falls back to the raw
+/// string when the encoded shape doesn't match.
+pub(crate) fn strip_condition_wrap(condition: &str, kind: Option<BpKind>) -> String {
+    match kind {
+        Some(BpKind::Conditional) => condition
+            .strip_prefix('(')
+            .and_then(|s| s.strip_suffix(')'))
+            .map(str::to_string)
+            .unwrap_or_else(|| condition.to_string()),
+        Some(BpKind::Logpoint) => condition
+            .strip_prefix("console.log(")
+            .and_then(|s| s.strip_suffix("), false"))
+            .map(str::to_string)
+            .unwrap_or_else(|| condition.to_string()),
+        _ => condition.to_string(),
     }
 }
 
@@ -974,33 +1015,75 @@ impl AtomioWindow {
                 (theme::TX_5, theme::TX_4)
             };
             let key = format!("bp-{}-{}", bp.id.0, line);
-            wrap = wrap.child(
+            // Kind tag: "Cond" / "Log" for conditional / logpoint
+            // breakpoints. Plain line breakpoints render no tag so the
+            // common case stays visually quiet. Falling back to None
+            // for ids not in the kind map keeps rendering safe if the
+            // map is ever out of sync with the registry.
+            let kind = self.breakpoint_kinds.get(&bp.id).copied();
+            let kind_tag: Option<&'static str> = match kind {
+                Some(BpKind::Conditional) => Some("Cond"),
+                Some(BpKind::Logpoint) => Some("Log"),
+                _ => None,
+            };
+            // Condition snippet: truncate hard so a 200-char expression
+            // doesn't blow the sidebar layout. Stripping the outer
+            // wrap (`(expr)` for cond, `console.log(expr), false` for
+            // logpoint) keeps the displayed text close to what the
+            // user typed.
+            let condition_snippet: Option<String> = bp.condition.as_ref().map(|c| {
+                let stripped = strip_condition_wrap(c, kind);
+                truncate_mid(&stripped, 32)
+            });
+            let hit_count = bp.hit_count;
+            let mut row = div()
+                .id(SharedString::from(key))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .py(px(2.0))
+                .rounded(px(3.0))
+                .hover(|s| s.bg(rgb(theme::BG_3)))
+                .child(
+                    div()
+                        .w(px(8.0))
+                        .h(px(8.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(dot_color)),
+                );
+            if let Some(tag) = kind_tag {
+                row = row.child(
+                    div()
+                        .px_1()
+                        .rounded(px(2.0))
+                        .bg(rgb(theme::ACCENT_SOFT))
+                        .text_color(rgb(theme::ACCENT))
+                        .text_xs()
+                        .child(tag),
+                );
+            }
+            row = row.child(
                 div()
-                    .id(SharedString::from(key))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .py(px(2.0))
-                    .rounded(px(3.0))
-                    .hover(|s| s.bg(rgb(theme::BG_3)))
-                    .child(
-                        div()
-                            .w(px(8.0))
-                            .h(px(8.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(dot_color)),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(text_color))
-                            .child(format!("{basename}:{}", line + 1)),
-                    )
-                    .on_click(cx.listener(move |this, _ev, _win, cx| {
-                        this.open_source_at(url.clone(), line, cx);
-                    })),
+                    .text_xs()
+                    .text_color(rgb(text_color))
+                    .child(format!("{basename}:{}", line + 1)),
             );
+            if let Some(snippet) = condition_snippet {
+                row = row.child(div().text_xs().text_color(rgb(theme::TX_4)).child(snippet));
+            }
+            if hit_count > 0 {
+                row = row.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme::TX_4))
+                        .child(format!("× {hit_count}")),
+                );
+            }
+            row = row.on_click(cx.listener(move |this, _ev, _win, cx| {
+                this.open_source_at(url.clone(), line, cx);
+            }));
+            wrap = wrap.child(row);
         }
         wrap
     }

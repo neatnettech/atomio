@@ -123,9 +123,14 @@ pub enum DebuggerEvent {
     BreakpointResolved { server_id: String, line: u32 },
     /// `Debugger.paused` -- runtime hit a breakpoint or stepped. The raw
     /// call-frame array is decoded into a typed [`CallStack`].
+    /// `hit_breakpoints` is the server-id list the runtime attributes
+    /// the pause to. Empty for step / pause / exception pauses; one or
+    /// more ids when the pause is due to a real breakpoint. The UI
+    /// folds it into the registry to drive the sidebar hit-count.
     Paused {
         reason: String,
         call_stack: CallStack,
+        hit_breakpoints: Vec<String>,
     },
     /// `Debugger.resumed` -- execution continued.
     Resumed,
@@ -536,7 +541,25 @@ async fn connect(
                             .cloned()
                             .unwrap_or(Value::Array(vec![]));
                         let call_stack = CallStack::from_cdp(&frames);
-                        let _ = evt_tx.send(DebuggerEvent::Paused { reason, call_stack });
+                        // CDP `Debugger.paused.hitBreakpoints` is an
+                        // array of server breakpoint ids -- one entry
+                        // per breakpoint the runtime credits the
+                        // pause to. Missing or non-array on
+                        // step / pause / exception breaks.
+                        let hit_breakpoints: Vec<String> = params
+                            .get("hitBreakpoints")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let _ = evt_tx.send(DebuggerEvent::Paused {
+                            reason,
+                            call_stack,
+                            hit_breakpoints,
+                        });
                     }
                     "Debugger.resumed" => {
                         let _ = evt_tx.send(DebuggerEvent::Resumed);

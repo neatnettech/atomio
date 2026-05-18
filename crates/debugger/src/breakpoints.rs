@@ -48,6 +48,11 @@ pub struct Breakpoint {
     pub server_id: Option<String>,
     /// User can disable a breakpoint without removing it.
     pub enabled: bool,
+    /// Number of times the runtime has reported this breakpoint in a
+    /// `Debugger.paused` event since it was set. Bumped via
+    /// [`BreakpointRegistry::record_hits`]; reset to 0 only by
+    /// dropping the breakpoint (creating a new one yields 0).
+    pub hit_count: u32,
 }
 
 /// Outcome of [`BreakpointRegistry::toggle`].
@@ -98,9 +103,32 @@ impl BreakpointRegistry {
             condition,
             server_id: None,
             enabled: true,
+            hit_count: 0,
         };
         self.by_id.insert(id, bp);
         id
+    }
+
+    /// Increment `hit_count` for every breakpoint whose `server_id`
+    /// matches an entry in `server_ids`. Used by the bridge to fold
+    /// `Debugger.paused.hitBreakpoints` into the local model so the
+    /// sidebar can show per-breakpoint hit tallies.
+    ///
+    /// Returns the number of breakpoints whose count was bumped --
+    /// useful in tests and for diagnostics when a server id doesn't
+    /// resolve (e.g. stale event after a remove).
+    pub fn record_hits<S: AsRef<str>>(&mut self, server_ids: &[S]) -> usize {
+        let mut bumped = 0;
+        for bp in self.by_id.values_mut() {
+            let Some(sid) = bp.server_id.as_deref() else {
+                continue;
+            };
+            if server_ids.iter().any(|s| s.as_ref() == sid) {
+                bp.hit_count = bp.hit_count.saturating_add(1);
+                bumped += 1;
+            }
+        }
+        bumped
     }
 
     /// Toggle a breakpoint at `(url, line)`. If one exists matching exactly,
@@ -291,5 +319,55 @@ mod tests {
         let mut reg = BreakpointRegistry::new();
         let id = reg.set(url("a.js"), 1, None, Some("count > 5".into()));
         assert_eq!(reg.get(id).unwrap().condition.as_deref(), Some("count > 5"));
+    }
+
+    #[test]
+    fn record_hits_bumps_only_matching_server_ids() {
+        let mut reg = BreakpointRegistry::new();
+        let a = reg.set(url("a.js"), 1, None, None);
+        let b = reg.set(url("b.js"), 2, None, None);
+        reg.attach_server_id(a, "srv-a");
+        reg.attach_server_id(b, "srv-b");
+
+        // Paused on a only.
+        let bumped = reg.record_hits(&["srv-a".to_string()]);
+        assert_eq!(bumped, 1);
+        assert_eq!(reg.get(a).unwrap().hit_count, 1);
+        assert_eq!(reg.get(b).unwrap().hit_count, 0);
+
+        // Multi-hit (the runtime may report several ids for a single pause).
+        let bumped = reg.record_hits(&["srv-a", "srv-b"]);
+        assert_eq!(bumped, 2);
+        assert_eq!(reg.get(a).unwrap().hit_count, 2);
+        assert_eq!(reg.get(b).unwrap().hit_count, 1);
+    }
+
+    #[test]
+    fn record_hits_ignores_unknown_server_ids() {
+        let mut reg = BreakpointRegistry::new();
+        let id = reg.set(url("a.js"), 1, None, None);
+        reg.attach_server_id(id, "srv-a");
+        // Stale id from a removed breakpoint, plus an unattached one.
+        let bumped = reg.record_hits(&["srv-gone", "srv-other"]);
+        assert_eq!(bumped, 0);
+        assert_eq!(reg.get(id).unwrap().hit_count, 0);
+    }
+
+    #[test]
+    fn record_hits_skips_breakpoints_without_server_id() {
+        // A freshly-set breakpoint that hasn't received its server id yet
+        // shouldn't be counted as a hit when "" or any id arrives.
+        let mut reg = BreakpointRegistry::new();
+        let id = reg.set(url("a.js"), 1, None, None);
+        let bumped = reg.record_hits::<&str>(&[""]);
+        assert_eq!(bumped, 0);
+        assert_eq!(reg.get(id).unwrap().hit_count, 0);
+    }
+
+    #[test]
+    fn new_breakpoint_starts_with_zero_hits() {
+        let mut reg = BreakpointRegistry::new();
+        let id = reg.set(url("a.js"), 1, None, None);
+        assert_eq!(reg.get(id).unwrap().hit_count, 0);
     }
 }
