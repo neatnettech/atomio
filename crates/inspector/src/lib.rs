@@ -259,22 +259,121 @@ impl RemoteValue {
     }
 
     fn display_for(value: &Value) -> String {
+        // BigInt, NaN, Infinity, -0 arrive here -- they have no JSON-serializable
+        // `value`, only this side channel. Use it verbatim ("123n", "NaN", ...).
+        if let Some(uv) = value.get("unserializableValue").and_then(|v| v.as_str()) {
+            return uv.to_string();
+        }
         if let Some(v) = value.get("value") {
-            match v {
-                Value::String(s) => format!("\"{s}\""),
+            return match v {
+                Value::String(s) => format_string_literal(s),
                 Value::Number(n) => n.to_string(),
                 Value::Bool(b) => b.to_string(),
                 Value::Null => "null".into(),
                 other => other.to_string(),
+            };
+        }
+        // Map/Set previews carry the first few entries; surface them so the
+        // pill reads `Map(2) {"a" => 1, "b" => 2}` instead of just `Map(2)`.
+        if let Some(preview) = value.get("preview") {
+            if let Some(s) = format_preview(preview) {
+                return s;
             }
-        } else if let Some(d) = value.get("description").and_then(|v| v.as_str()) {
-            d.to_string()
-        } else if let Some(t) = value.get("type").and_then(|v| v.as_str()) {
+        }
+        if let Some(d) = value.get("description").and_then(|v| v.as_str()) {
+            return format_description(d);
+        }
+        if let Some(t) = value.get("type").and_then(|v| v.as_str()) {
             format!("[{t}]")
         } else {
             "undefined".into()
         }
     }
+}
+
+/// Max characters of payload to keep before appending an ellipsis. Tuned for
+/// the inline-pill width; watches and scopes accept the same cutoff so a value
+/// looks identical no matter which pane surfaces it.
+const MAX_INLINE_LEN: usize = 80;
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    format!("{head}...")
+}
+
+fn format_string_literal(s: &str) -> String {
+    // Strip newlines/tabs/CRs so a multi-line string literal stays on one row
+    // -- the pill is single-line and otherwise visually explodes.
+    let flattened: String = s
+        .chars()
+        .map(|c| match c {
+            '\n' | '\r' | '\t' => ' ',
+            c => c,
+        })
+        .collect();
+    format!("\"{}\"", truncate_chars(&flattened, MAX_INLINE_LEN))
+}
+
+fn format_description(d: &str) -> String {
+    // Errors carry their full stack in `description`; functions carry the
+    // whole body. Collapse to the first line so the pill stays single-row.
+    let first = d.lines().next().unwrap_or(d);
+    truncate_chars(first, MAX_INLINE_LEN)
+}
+
+fn format_preview(preview: &Value) -> Option<String> {
+    let subtype = preview.get("subtype").and_then(|v| v.as_str())?;
+    let entries = preview.get("entries").and_then(|v| v.as_array())?;
+    let desc = preview
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or(match subtype {
+            "map" => "Map",
+            "set" => "Set",
+            _ => return None,
+        });
+    if entries.is_empty() {
+        return Some(desc.to_string());
+    }
+    let mut items: Vec<String> = Vec::new();
+    for entry in entries.iter().take(3) {
+        match subtype {
+            "map" => {
+                let k = entry.get("key").map(preview_entry_short)?;
+                let v = entry.get("value").map(preview_entry_short)?;
+                items.push(format!("{k} => {v}"));
+            }
+            "set" => {
+                let v = entry.get("value").map(preview_entry_short)?;
+                items.push(v);
+            }
+            _ => return None,
+        }
+    }
+    let body = if entries.len() > 3 {
+        format!("{}, ...", items.join(", "))
+    } else {
+        items.join(", ")
+    };
+    Some(format!("{desc} {{{body}}}"))
+}
+
+fn preview_entry_short(v: &Value) -> String {
+    let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+    if let Some(raw) = v.get("value").and_then(|x| x.as_str()) {
+        return if t == "string" {
+            format!("\"{raw}\"")
+        } else {
+            raw.to_string()
+        };
+    }
+    if let Some(d) = v.get("description").and_then(|x| x.as_str()) {
+        return d.lines().next().unwrap_or(d).to_string();
+    }
+    format!("[{t}]")
 }
 
 /// One row in a `Runtime.getProperties` response.
@@ -486,6 +585,158 @@ mod tests {
         let v = serde_json::json!({"type": "undefined"});
         let r = RemoteValue::from_cdp(&v);
         assert_eq!(r.display, "[undefined]");
+    }
+
+    #[test]
+    fn remote_value_bigint_via_unserializable() {
+        let v = serde_json::json!({
+            "type": "bigint",
+            "unserializableValue": "9007199254740993n",
+            "description": "9007199254740993n",
+        });
+        let r = RemoteValue::from_cdp(&v);
+        assert_eq!(r.display, "9007199254740993n");
+    }
+
+    #[test]
+    fn remote_value_nan_and_infinity() {
+        for raw in ["NaN", "Infinity", "-Infinity", "-0"] {
+            let v = serde_json::json!({"type": "number", "unserializableValue": raw});
+            assert_eq!(RemoteValue::from_cdp(&v).display, raw);
+        }
+    }
+
+    #[test]
+    fn remote_value_long_string_truncated() {
+        let long: String = "x".repeat(200);
+        let v = serde_json::json!({"type": "string", "value": long});
+        let r = RemoteValue::from_cdp(&v);
+        // Quotes + 80 chars + "..." == 84 chars total.
+        assert!(r.display.starts_with('"'));
+        assert!(r.display.ends_with("...\""));
+        assert_eq!(r.display.chars().count(), 1 + 80 + 3 + 1);
+    }
+
+    #[test]
+    fn remote_value_multiline_string_flattened() {
+        let v = serde_json::json!({"type": "string", "value": "line1\nline2\tend"});
+        let r = RemoteValue::from_cdp(&v);
+        assert_eq!(r.display, "\"line1 line2 end\"");
+    }
+
+    #[test]
+    fn remote_value_error_description_collapsed() {
+        let v = serde_json::json!({
+            "type": "object",
+            "subtype": "error",
+            "objectId": "obj-err",
+            "description": "Error: kaboom\n    at checkout (app.ts:17:4)\n    at run (app.ts:3:2)",
+        });
+        let r = RemoteValue::from_cdp(&v);
+        assert_eq!(r.display, "Error: kaboom");
+        assert!(r.expandable);
+    }
+
+    #[test]
+    fn remote_value_long_description_truncated() {
+        let body: String = "a".repeat(150);
+        let desc = format!("function huge() {{ {body} }}");
+        let v = serde_json::json!({
+            "type": "function",
+            "objectId": "obj-fn",
+            "description": desc,
+        });
+        let r = RemoteValue::from_cdp(&v);
+        assert!(r.display.ends_with("..."));
+        assert_eq!(r.display.chars().count(), 80 + 3);
+    }
+
+    #[test]
+    fn remote_value_map_preview_entries() {
+        let v = serde_json::json!({
+            "type": "object",
+            "subtype": "map",
+            "objectId": "obj-map",
+            "description": "Map(2)",
+            "preview": {
+                "subtype": "map",
+                "description": "Map(2)",
+                "entries": [
+                    {
+                        "key":   {"type": "string", "value": "a"},
+                        "value": {"type": "number", "value": "1"}
+                    },
+                    {
+                        "key":   {"type": "string", "value": "b"},
+                        "value": {"type": "number", "value": "2"}
+                    }
+                ]
+            }
+        });
+        let r = RemoteValue::from_cdp(&v);
+        assert_eq!(r.display, "Map(2) {\"a\" => 1, \"b\" => 2}");
+    }
+
+    #[test]
+    fn remote_value_set_preview_entries() {
+        let v = serde_json::json!({
+            "type": "object",
+            "subtype": "set",
+            "objectId": "obj-set",
+            "description": "Set(3)",
+            "preview": {
+                "subtype": "set",
+                "description": "Set(3)",
+                "entries": [
+                    {"value": {"type": "string", "value": "x"}},
+                    {"value": {"type": "string", "value": "y"}},
+                    {"value": {"type": "string", "value": "z"}}
+                ]
+            }
+        });
+        let r = RemoteValue::from_cdp(&v);
+        assert_eq!(r.display, "Set(3) {\"x\", \"y\", \"z\"}");
+    }
+
+    #[test]
+    fn remote_value_map_preview_overflows_with_ellipsis() {
+        let v = serde_json::json!({
+            "type": "object",
+            "subtype": "map",
+            "objectId": "obj-map-big",
+            "preview": {
+                "subtype": "map",
+                "description": "Map(5)",
+                "entries": [
+                    {"key": {"type": "string", "value": "a"}, "value": {"type": "number", "value": "1"}},
+                    {"key": {"type": "string", "value": "b"}, "value": {"type": "number", "value": "2"}},
+                    {"key": {"type": "string", "value": "c"}, "value": {"type": "number", "value": "3"}},
+                    {"key": {"type": "string", "value": "d"}, "value": {"type": "number", "value": "4"}},
+                    {"key": {"type": "string", "value": "e"}, "value": {"type": "number", "value": "5"}}
+                ]
+            }
+        });
+        let r = RemoteValue::from_cdp(&v);
+        assert!(r
+            .display
+            .starts_with("Map(5) {\"a\" => 1, \"b\" => 2, \"c\" => 3, ..."));
+        assert!(r.display.ends_with("...}"));
+    }
+
+    #[test]
+    fn remote_value_empty_map_preview_falls_back_to_description() {
+        let v = serde_json::json!({
+            "type": "object",
+            "subtype": "map",
+            "objectId": "obj-empty-map",
+            "preview": {
+                "subtype": "map",
+                "description": "Map(0)",
+                "entries": []
+            }
+        });
+        let r = RemoteValue::from_cdp(&v);
+        assert_eq!(r.display, "Map(0)");
     }
 
     #[test]
