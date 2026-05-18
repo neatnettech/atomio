@@ -118,6 +118,43 @@ pub(crate) enum BpKind {
     Logpoint,
 }
 
+/// Single-selection filter for the scope list in the Debugger pane.
+/// Chip click sets one of these; `All` shows every scope the runtime
+/// reported. The non-All variants group related CDP scope kinds the
+/// way Chrome DevTools does so each tab actually contains data:
+/// "Local" pulls in `Local` + `Block` + `Catch`; "Global" pulls in
+/// `Global` + `Module` + `Script`; "Closure" is just `Closure`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScopeFilter {
+    All,
+    Local,
+    Closure,
+    Global,
+}
+
+impl ScopeFilter {
+    /// Whether a given `ScopeKind` should render under this filter.
+    pub(crate) fn matches(self, kind: inspector::ScopeKind) -> bool {
+        use inspector::ScopeKind as K;
+        match self {
+            ScopeFilter::All => true,
+            ScopeFilter::Local => matches!(kind, K::Local | K::Block | K::Catch),
+            ScopeFilter::Closure => matches!(kind, K::Closure),
+            ScopeFilter::Global => matches!(kind, K::Global | K::Module | K::Script),
+        }
+    }
+
+    /// Short label rendered on the chip.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            ScopeFilter::All => "All",
+            ScopeFilter::Local => "Local",
+            ScopeFilter::Closure => "Closure",
+            ScopeFilter::Global => "Global",
+        }
+    }
+}
+
 /// One terminal tab. Pairs the PTY session with a user-visible title
 /// used in the tab strip. Title is chosen at spawn time by the
 /// handler (shell basename, "expo start", etc.) and doesn't update
@@ -199,6 +236,10 @@ struct AtomioWindow {
     /// the user-facing intent so the sidebar can label rows
     /// correctly. Cleared together with `breakpoints` on disconnect.
     breakpoint_kinds: HashMap<debugger::breakpoints::BreakpointId, BpKind>,
+    /// Active scope-filter chip in the Debugger pane. Cycles through
+    /// All / Local / Closure / Global; `All` is the default and
+    /// shows every scope the runtime reported.
+    scope_filter: ScopeFilter,
     /// True when runtime is paused at a breakpoint or step.
     paused: bool,
     /// Last paused-frames payload (raw CDP `callFrames`). Decoded on demand
@@ -1174,6 +1215,16 @@ impl AtomioWindow {
     /// otherwise kicks off a `FetchSource` and parks a pending jump so
     /// the caret lands when the source arrives. Shared by frame clicks
     /// and breakpoint-sidebar clicks.
+    /// Switch the scope-filter chip selection. Clicking the active
+    /// chip reselects it (no-op visually, deliberate -- avoids the
+    /// "where did my filter go" surprise of toggling back to All).
+    pub(crate) fn set_scope_filter(&mut self, filter: ScopeFilter, cx: &mut Context<Self>) {
+        if self.scope_filter != filter {
+            self.scope_filter = filter;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn open_source_at(&mut self, url: String, line: u32, cx: &mut Context<Self>) {
         if self.current_url.as_deref() == Some(url.as_str()) {
             self.state.move_cursor_to(line as usize, 0);
@@ -2498,6 +2549,7 @@ fn main() {
                             scripts: ScriptRegistry::new(),
                             breakpoints: BreakpointRegistry::new(),
                             breakpoint_kinds: HashMap::new(),
+                            scope_filter: ScopeFilter::All,
                             paused: false,
                             call_stack: None,
                             properties: HashMap::new(),
@@ -2553,4 +2605,56 @@ fn main() {
 
             cx.activate(true);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inspector::ScopeKind;
+
+    #[test]
+    fn scope_filter_all_matches_every_kind() {
+        for k in [
+            ScopeKind::Local,
+            ScopeKind::Block,
+            ScopeKind::Catch,
+            ScopeKind::Closure,
+            ScopeKind::Global,
+            ScopeKind::Module,
+            ScopeKind::Script,
+            ScopeKind::With,
+            ScopeKind::Eval,
+            ScopeKind::Other,
+        ] {
+            assert!(ScopeFilter::All.matches(k), "All should match {:?}", k);
+        }
+    }
+
+    #[test]
+    fn scope_filter_local_groups_block_and_catch() {
+        // Caller-local kinds: Local, Block (let/const), Catch (catch binding).
+        assert!(ScopeFilter::Local.matches(ScopeKind::Local));
+        assert!(ScopeFilter::Local.matches(ScopeKind::Block));
+        assert!(ScopeFilter::Local.matches(ScopeKind::Catch));
+        // Others should not bleed in.
+        assert!(!ScopeFilter::Local.matches(ScopeKind::Closure));
+        assert!(!ScopeFilter::Local.matches(ScopeKind::Global));
+        assert!(!ScopeFilter::Local.matches(ScopeKind::Module));
+    }
+
+    #[test]
+    fn scope_filter_closure_is_strict() {
+        assert!(ScopeFilter::Closure.matches(ScopeKind::Closure));
+        assert!(!ScopeFilter::Closure.matches(ScopeKind::Local));
+        assert!(!ScopeFilter::Closure.matches(ScopeKind::Block));
+    }
+
+    #[test]
+    fn scope_filter_global_groups_module_and_script() {
+        assert!(ScopeFilter::Global.matches(ScopeKind::Global));
+        assert!(ScopeFilter::Global.matches(ScopeKind::Module));
+        assert!(ScopeFilter::Global.matches(ScopeKind::Script));
+        assert!(!ScopeFilter::Global.matches(ScopeKind::Local));
+        assert!(!ScopeFilter::Global.matches(ScopeKind::Closure));
+    }
 }

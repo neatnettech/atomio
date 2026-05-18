@@ -17,7 +17,7 @@ use language::{HighlightKind, Language, Span};
 
 use crate::cdp_bridge::{ConnectionState, DebuggerCommand};
 use crate::theme;
-use crate::{AtomioWindow, BpKind, DockPane, ProfilerRefresh, SimulatorCapture};
+use crate::{AtomioWindow, BpKind, DockPane, ProfilerRefresh, ScopeFilter, SimulatorCapture};
 
 /// Per-line view used by the editor renderer. Built by
 /// [`AtomioWindow::buffer_line_views`] and consumed by
@@ -917,14 +917,55 @@ impl AtomioWindow {
 
         let mut scopes_section = div().flex().flex_col().px_3().py_2();
         if let Some(top) = stack.frames.first() {
-            scopes_section = scopes_section.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(theme::TX_3))
-                    .pb_1()
-                    .child(format!("Scopes ({})", top.scopes.len())),
-            );
-            for (si, scope) in top.scopes.iter().enumerate() {
+            // Count visible scopes under the current filter so the
+            // header reflects what the user sees, not the raw total.
+            let visible: Vec<&inspector::Scope> = top
+                .scopes
+                .iter()
+                .filter(|s| self.scope_filter.matches(s.kind))
+                .collect();
+            scopes_section =
+                scopes_section.child(div().text_xs().text_color(rgb(theme::TX_3)).pb_1().child(
+                    format!("Scopes ({} of {})", visible.len(), top.scopes.len()),
+                ));
+            // Filter chip row: single-selection, click to switch.
+            // Active chip uses ACCENT_SOFT bg, inactive BG_2. No
+            // chip for "no scopes at all" -- header already says so.
+            let chip_row = {
+                let active = self.scope_filter;
+                let mut row = div().flex().flex_row().gap_1().pb_1().text_xs();
+                for filter in [
+                    ScopeFilter::All,
+                    ScopeFilter::Local,
+                    ScopeFilter::Closure,
+                    ScopeFilter::Global,
+                ] {
+                    let is_active = filter == active;
+                    let (bg, fg) = if is_active {
+                        (theme::ACCENT_SOFT, theme::ACCENT)
+                    } else {
+                        (theme::BG_2, theme::TX_3)
+                    };
+                    let id = SharedString::from(format!("scope-chip-{}", filter.label()));
+                    row = row.child(
+                        div()
+                            .id(id)
+                            .px_2()
+                            .py(px(1.0))
+                            .rounded(px(3.0))
+                            .bg(rgb(bg))
+                            .text_color(rgb(fg))
+                            .hover(|s| s.bg(rgb(theme::BG_3)))
+                            .child(filter.label())
+                            .on_click(cx.listener(move |this, _ev, _win, cx| {
+                                this.set_scope_filter(filter, cx);
+                            })),
+                    );
+                }
+                row
+            };
+            scopes_section = scopes_section.child(chip_row);
+            for (si, scope) in visible.iter().enumerate() {
                 let label = scope.kind.label();
                 let object_id = scope.object_id.clone();
                 let is_open = self.expanded.contains(&object_id);
