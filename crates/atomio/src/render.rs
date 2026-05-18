@@ -996,7 +996,7 @@ impl AtomioWindow {
             }
         }
 
-        let watch_section = self.render_watch_section();
+        let watch_section = self.render_watch_section(cx);
         let breakpoints_section = self.render_breakpoints_section(cx);
 
         div()
@@ -1130,7 +1130,38 @@ impl AtomioWindow {
     }
 
     /// Watch expressions section.
-    fn render_watch_section(&self) -> gpui::Div {
+    fn render_watch_section(&self, cx: &mut Context<AtomioWindow>) -> gpui::Div {
+        // Header row: title + "+" button that opens the palette
+        // pre-seeded with `=` so the next keystroke starts the
+        // watch expression. The button is always visible (also when
+        // the list is empty) so the affordance is discoverable
+        // without reading the empty-state hint.
+        let add_button = div()
+            .id(SharedString::from("watch-add"))
+            .px_2()
+            .py(px(0.0))
+            .rounded(px(3.0))
+            .bg(rgb(theme::ACCENT_SOFT))
+            .text_color(rgb(theme::ACCENT))
+            .text_xs()
+            .hover(|s| s.bg(rgb(theme::BG_3)))
+            .child("+ Add")
+            .on_click(cx.listener(|this, _ev, _win, cx| {
+                this.open_palette_for_watch(cx);
+            }));
+        let header = div()
+            .flex()
+            .flex_row()
+            .justify_between()
+            .items_center()
+            .pb_1()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::TX_3))
+                    .child(format!("Watch ({})", self.watches.len())),
+            )
+            .child(add_button);
         let mut wrap = div()
             .flex()
             .flex_col()
@@ -1138,33 +1169,34 @@ impl AtomioWindow {
             .py_2()
             .border_t_1()
             .border_color(rgb(theme::LINE_1))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(theme::TX_3))
-                    .pb_1()
-                    .child(format!("Watch ({})", self.watches.len())),
-            );
+            .child(header);
         if self.watches.is_empty() {
             wrap = wrap.child(
                 div()
                     .text_xs()
                     .text_color(rgb(theme::TX_4))
-                    .child("(empty — palette: Debug: Watch 'this')"),
+                    .child("(empty — click + Add or use the palette: =expr)"),
             );
             return wrap;
         }
-        for w in self.watches.iter() {
+        for (idx, w) in self.watches.iter().enumerate() {
             let (display, color) = match &w.last {
                 None => ("evaluating...".to_string(), theme::TX_4),
                 Some(Ok(rv)) => (rv.display.clone(), value_color_for(rv.type_str.as_str())),
                 Some(Err(e)) => (e.clone(), theme::ERROR),
             };
+            // Per-row "×" button removes the watch at `idx`. Keyed by
+            // index, so removal of an earlier row reindexes the
+            // remaining listener closures on the next render -- gpui
+            // re-creates them from the fresh iterator, so the closure
+            // never holds a stale index.
+            let remove_id = SharedString::from(format!("watch-x-{idx}"));
             wrap = wrap.child(
                 div()
                     .flex()
                     .flex_row()
                     .gap_2()
+                    .items_center()
                     .text_xs()
                     .py(px(2.0))
                     .child(
@@ -1173,7 +1205,18 @@ impl AtomioWindow {
                             .text_color(rgb(theme::TX_2))
                             .child(w.expression.clone()),
                     )
-                    .child(div().flex_1().text_color(rgb(color)).child(display)),
+                    .child(div().flex_1().text_color(rgb(color)).child(display))
+                    .child(
+                        div()
+                            .id(remove_id)
+                            .px_1()
+                            .text_color(rgb(theme::TX_4))
+                            .hover(|s| s.text_color(rgb(theme::ERROR)))
+                            .child("×")
+                            .on_click(cx.listener(move |this, _ev, _win, cx| {
+                                this.remove_watch(idx, cx);
+                            })),
+                    ),
             );
         }
         wrap

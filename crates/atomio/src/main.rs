@@ -1833,12 +1833,21 @@ impl AtomioWindow {
         cx.notify();
     }
 
-    /// Remove a watch expression by index. Currently only callable from
-    /// future per-watch UI; kept here so the row-level remove handler can
-    /// land in a follow-up without restructuring.
-    #[allow(dead_code)]
-    fn remove_watch(&mut self, idx: usize, cx: &mut Context<Self>) {
+    /// Remove a watch expression by index. Called by the per-row "x"
+    /// button in the watch pane.
+    pub(crate) fn remove_watch(&mut self, idx: usize, cx: &mut Context<Self>) {
         self.watches.remove(idx);
+        cx.notify();
+    }
+
+    /// Open the command palette pre-seeded with `=` so the next
+    /// keystroke starts a watch expression. The palette's existing
+    /// `=expr` handler in `confirm_palette` takes over from there.
+    /// Used by the "+" button in the watch pane header so users
+    /// don't have to remember the palette prefix.
+    pub(crate) fn open_palette_for_watch(&mut self, cx: &mut Context<Self>) {
+        self.palette_query = Some("=".to_string());
+        self.palette_selected = 0;
         cx.notify();
     }
 
